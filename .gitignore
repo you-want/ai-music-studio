@@ -1,0 +1,36 @@
+# ================= 密钥与本地配置（绝不入库） =================
+config.local.json
+config.json
+*.local.json
+
+# ================= 模型权重 / 大文件 =================
+# 权重下载与安装见 scripts/setup_neural.sh 与 docs/CONFIG.md
+DiffRhythm/pretrained/
+DiffRhythm/g2p/sources/g2p_chinese_model/
+DiffRhythm/g2p/sources/chinese_lexicon.txt
+*.onnx
+*.pt
+*.bin
+*.safetensors
+# 例外：推理必需的小文件
+!DiffRhythm/infer/example/vocal.npy
+
+# ================= 运行产物 =================
+backend/output/
+DiffRhythm/test_output/
+.tts_cache/
+*.log
+
+# ================= Python =================
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# ================= 编辑器 / 系统 =================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.screenshots/

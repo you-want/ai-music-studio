@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgc2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#160e2e"/><stop offset="1" stop-color="#3c2470"/>
+    </linearGradient>
+    <linearGradient id="bub" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8f6bff"/><stop offset="1" stop-color="#5b39d6"/>
+    </linearGradient>
+    <radialGradient id="glowc2" cx="0.8" cy="0.55" r="0.62">
+      <stop offset="0" stop-color="#ffc857" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#ffc857" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bgc2)"/>
+  <rect width="512" height="512" rx="116" fill="url(#glowc2)"/>
+  <path d="M256 86 C 146 86, 78 148, 78 234 C 78 300, 124 350, 194 368 L 172 430 C 228 410, 262 392, 292 370 C 372 360, 434 306, 434 234 C 434 148, 366 86, 256 86 Z" fill="url(#bub)"/><rect x="242" y="140" width="22" height="176" rx="11" fill="#ffc857"/><ellipse cx="222" cy="318" rx="40" ry="31" fill="#ffc857"/>
+</svg>

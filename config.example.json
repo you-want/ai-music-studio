@@ -1,0 +1,11 @@
+{
+  "_说明": "复制为 config.local.json 后生效。api_key 填入后 enabled 自动生效；GLM-4-Flash 是智谱免费模型，key 在 https://open.bigmodel.cn 申请。也可以不建此文件，直接在网页右上角「引擎设置」里填写。",
+  "llm": {
+    "enabled": true,
+    "base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "你的APIKey",
+    "model": "glm-4-flash",
+    "temperature": 0.9,
+    "timeout": 90
+  }
+}

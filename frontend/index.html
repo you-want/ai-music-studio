@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>织歌 SongWeaver · 一句话，织一首歌</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="orb orb-1"></div>
+  <div class="orb orb-2"></div>
+  <div class="orb orb-3"></div>
+
+  <header>
+    <div class="brand">
+      <svg class="brand-icon" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="bif" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#160e2e"/><stop offset="1" stop-color="#3c2470"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#bg)"/><rect x="5.4" y="27.0" width="5.2" height="10" rx="2.6" fill="#b39bff"/><rect x="11.4" y="23.5" width="5.2" height="17" rx="2.6" fill="#8f6bff"/><rect x="17.4" y="20.0" width="5.2" height="24" rx="2.6" fill="#ffc857"/><rect x="23.4" y="17.5" width="5.2" height="29" rx="2.6" fill="#00d4ff"/><rect x="29.4" y="16.0" width="5.2" height="32" rx="2.6" fill="#b39bff"/><rect x="35.4" y="17.5" width="5.2" height="29" rx="2.6" fill="#8f6bff"/><rect x="41.4" y="20.0" width="5.2" height="24" rx="2.6" fill="#ffc857"/><rect x="47.4" y="23.5" width="5.2" height="17" rx="2.6" fill="#00d4ff"/><rect x="53.4" y="27.0" width="5.2" height="10" rx="2.6" fill="#b39bff"/></svg>
+      <span class="logo">织歌</span><span class="logo-en">SONGWEAVER</span>
+    </div>
+    <div class="tagline">一句话，织一首歌 · 离线引擎 + 大模型 + 神经歌声</div>
+    <button id="btn-settings" class="ghost small">⚙️ 引擎设置</button>
+  </header>
+
+  <main>
+    <!-- ===================== 创作面板 ===================== -->
+    <section class="card compose-panel">
+      <div class="mode-tabs">
+        <button id="tab-simple" class="mode-tab active">💬 简易</button>
+        <button id="tab-advanced" class="mode-tab">🎛 进阶</button>
+      </div>
+
+      <!-- 简易模式 -->
+      <div id="panel-simple">
+        <label class="field-label" for="prompt">① 描述你想听的歌（依据）</label>
+        <textarea id="prompt" rows="3"
+          placeholder="例如：夏天的傍晚，骑车载着西瓜和晚霞回家"></textarea>
+        <button id="btn-inspire" class="ghost small">🎲 随机灵感</button>
+      </div>
+
+      <!-- 进阶 · 第一步：依据（想表达什么） -->
+      <div id="panel-adv-req" class="hidden">
+        <label class="field-label" for="lyrics-req">① 写词要求 —— 依据：想表达什么、必须出现的意象、押什么韵</label>
+        <input id="lyrics-req" type="text" maxlength="200"
+          placeholder="例：异乡人的深夜故事，要出现热咖啡和玻璃窗，副歌押 an 韵">
+      </div>
+
+      <!-- 共享：风格 / 情绪 / 节奏 -->
+      <label class="field-label">② 风格</label>
+      <div class="chips" id="genre-chips"></div>
+
+      <label class="field-label">情绪</label>
+      <div class="chips" id="mood-chips"></div>
+
+      <div class="sliders">
+        <label>时长 <b id="dur-val">30s</b>
+          <input type="range" id="duration" min="15" max="120" step="5" value="30">
+        </label>
+        <label>BPM <b id="bpm-val">自动</b>
+          <input type="range" id="bpm" min="0" max="180" step="1" value="0">
+        </label>
+      </div>
+
+      <!-- 进阶 · 第二步：歌词（依据上面的要求与风格生成或手写） -->
+      <div id="panel-adv-lyrics" class="hidden">
+        <label class="field-label" for="lyrics">③ 歌词（留空则按 ① 的要求 + ② 的风格自动写）
+          <button id="btn-ai-lyrics" class="ghost small inline-btn">✍️ AI 写词</button>
+        </label>
+        <textarea id="lyrics" rows="8"
+          placeholder="[Verse]&#10;主歌第一句…&#10;主歌第二句…&#10;&#10;[Chorus]&#10;副歌第一句…&#10;&#10;（留空 + 点 AI 写词 = 按上面配置生成）"></textarea>
+        <div class="hint">支持段落标记 [Verse] 主歌 / [Chorus] 副歌 / [Bridge] 桥段（中英文均可）；无标记时自动分配。歌词按"每小节一句"对齐旋律。</div>
+      </div>
+
+      <div id="advanced-extra" class="hidden">
+        <label class="field-label" for="title">④ 歌名（留空自动起）</label>
+        <input id="title" type="text" placeholder="例如：晚风来信">
+        <div class="provider-row">
+          <span class="field-label-inline">音色</span>
+          <select id="voice"></select>
+        </div>
+        <div class="provider-row">
+          <span class="field-label-inline">调性</span>
+          <select id="key-sel"></select>
+        </div>
+        <label class="check-row" id="sing-row"><input type="checkbox" id="sing" checked> 🎤 演唱歌词（默认开启；取消则为纯器乐）</label>
+        <label class="check-row"><input type="checkbox" id="dual"> 一次生成 2 个候选版本（A/B 对比）</label>
+        <div class="provider-row hidden" id="ref-audio-row">
+          <span class="field-label-inline">参考音频</span>
+          <input id="ref-audio-file" type="file" accept=".wav,.mp3,.flac,audio/*" class="ref-file">
+          <button id="btn-ref-upload" class="ghost small">⬆ 上传</button>
+          <span id="ref-audio-name" class="hint-inline"></span>
+        </div>
+        <label class="check-row hidden" id="full-song-row">
+          <input type="checkbox" id="full-song"> 🕐 生成完整版 4m45s（约 3 倍耗时）
+        </label>
+        <div class="hint hidden" id="ref-audio-hint">🧠 神经歌声引擎：可选上传 ≥10 秒参考音频做风格迁移（曲风/唱腔向参考靠拢）；不传则按风格描述生成。生成后自动对齐歌词时间轴并分离分轨。</div>
+      </div>
+
+      <hr class="sep">
+      <div class="provider-row">
+        <span class="field-label-inline">引擎</span>
+        <select id="provider">
+          <option value="auto">自动（推荐）</option>
+          <option value="mock">离线 Mock</option>
+          <option value="llm">大模型 LLM</option>
+          <option value="diffrhythm" id="opt-diffrhythm">🧠 神经歌声（真人演唱）</option>
+        </select>
+        <span id="llm-badge" class="badge">LLM 未配置</span>
+      </div>
+
+      <button id="btn-generate" class="primary big">✨ 生成音乐</button>
+
+      <div id="job-status" class="job-status hidden">
+        <div class="spinner"></div>
+        <div class="job-text">
+          <div id="job-stage">准备中…</div>
+          <div class="bar"><div id="job-bar"></div></div>
+        </div>
+        <button id="btn-job-cancel" class="ghost small" title="取消任务">✕</button>
+      </div>
+    </section>
+
+    <!-- ===================== 播放器面板 ===================== -->
+    <section class="card player-panel hidden" id="player-panel">
+      <div class="song-head">
+        <img id="cover" class="cover" alt="封面">
+        <div class="song-head-text">
+          <h2 id="song-title">—</h2>
+          <div class="tags" id="song-tags"></div>
+        </div>
+      </div>
+      <div class="lyric-now" id="lyric-now">&nbsp;</div>
+
+      <canvas id="spectrum" height="46"></canvas>
+
+      <audio id="audio" preload="auto"></audio>
+      <div class="player-controls">
+        <button id="btn-play" class="round" title="播放 / 暂停">▶</button>
+        <div class="seek" id="seek"><div id="seek-fill"></div></div>
+        <span id="time-label" class="time">0:00 / 0:00</span>
+      </div>
+
+      <div class="actions-groups">
+        <div class="action-group">
+          <span class="ag-label">变奏</span>
+          <button id="btn-remix" class="ghost small">🔁 再来一版</button>
+          <button id="btn-extend" class="ghost small">⏱ 延长 30s</button>
+          <button id="btn-regen" class="ghost small">🎼 换副歌</button>
+        </div>
+        <div class="action-group">
+          <span class="ag-label">下载</span>
+          <a id="dl-wav" class="ghost small" download="song.wav">WAV</a>
+          <a id="dl-midi" class="ghost small" download="song.mid">MIDI</a>
+          <a id="dl-cover" class="ghost small" download="cover.png">封面</a>
+          <button id="btn-mv" class="ghost small">🎬 MV</button>
+          <a id="dl-bundle" class="ghost small" download="分享包.zip">📦 分享包</a>
+        </div>
+        <div class="action-group" id="stems-group">
+          <span class="ag-label">分轨</span>
+          <a id="stem-vocal" class="ghost small stem-link" download="vocal.wav">主唱</a>
+          <a id="stem-harmony" class="ghost small stem-link" download="harmony.wav">和声</a>
+          <a id="stem-bass" class="ghost small stem-link" download="bass.wav">贝斯</a>
+          <a id="stem-drums" class="ghost small stem-link" download="drums.wav">鼓</a>
+        </div>
+        <div class="action-group">
+          <span class="ag-label">管理</span>
+          <button id="btn-fav" class="ghost small">☆ 收藏</button>
+          <button id="btn-rename" class="ghost small">✏️ 改名</button>
+        </div>
+      </div>
+
+      <div class="roll-wrap" id="roll-wrap">
+        <canvas id="roll"></canvas>
+        <div id="playhead" class="playhead hidden"></div>
+      </div>
+      <div class="hint" id="roll-hint">🎹 钢琴卷帘：紫=主旋律/人声 · 青=和声垫/琶音 · 金=贝斯 · 底部=鼓组。点击卷帘任意位置可跳转播放。</div>
+    </section>
+  </main>
+
+  <!-- ===================== 作品目录 ===================== -->
+  <section class="card library">
+    <div class="lib-head">
+      <h3>📁 作品目录</h3>
+      <span id="lib-count" class="lib-count"></span>
+      <input id="lib-search" type="text" placeholder="🔍 搜索标题 / 风格 / 情绪">
+    </div>
+    <div id="song-list" class="song-list"><div class="empty">还没有作品，快去生成第一首吧 ✨</div></div>
+  </section>
+
+  <!-- ===================== 设置弹窗 ===================== -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card card">
+      <h3>⚙️ 引擎设置</h3>
+      <p class="muted">默认离线 Mock 引擎即可完整使用，零配置零费用。
+        想要更强的"作曲大脑"和 AI 写词，可免费开通
+        <a href="https://open.bigmodel.cn" target="_blank">智谱 GLM-4-Flash</a>（免费模型），
+        或填入任何 OpenAI 兼容端点（DeepSeek / OpenAI / 本地 Ollama）。</p>
+      <label class="check-row"><input type="checkbox" id="cfg-enabled"> 启用大模型（失败自动回落离线引擎）</label>
+      <label class="field-label">API Base URL</label>
+      <input id="cfg-base-url" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4">
+      <label class="field-label">模型</label>
+      <input id="cfg-model" type="text" placeholder="glm-4-flash">
+      <label class="field-label">API Key</label>
+      <input id="cfg-key" type="password" placeholder="粘贴 API Key（留空保持不变）">
+      <div class="neural-box" id="cfg-neural">
+        <b>🧠 神经歌声引擎（DiffRhythm · 本地 · 零费用）</b>
+        <div id="cfg-neural-status" class="small-text">检测中…</div>
+        <div class="small-text muted">真声演唱完整歌曲（95 秒/首，CPU 渲染约 15-30 分钟）。
+          未安装时运行：<code>bash scripts/setup_neural.sh</code></div>
+      </div>
+      <div class="modal-actions">
+        <button id="cfg-test" class="ghost">🔌 测试连接</button>
+        <button id="cfg-cancel" class="ghost">取消</button>
+        <button id="cfg-save" class="primary">保存</button>
+      </div>
+      <div id="cfg-test-result" class="cfg-test-result hidden"></div>
+      <div id="cfg-status" class="muted small-text"></div>
+    </div>
+  </div>
+
+  <footer>织歌 SongWeaver · 本地运行 · 离线 Mock + 大模型 + 神经歌声 · WAV / MIDI / 分轨导出</footer>
+  <script src="/app.js"></script>
+</body>
+</html>

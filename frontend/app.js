@@ -1,0 +1,1050 @@
+/* 织歌 SongWeaver 前端逻辑（无框架）
+ * v2 新增：简易/进阶双模式、自定义歌词、AI 写词、音色/调性选择、
+ * 双版本候选、分轨下载、再来一版/延长、AI 封面生成 */
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+
+/* 局域网 Token 模式：页面以 /?token=xxx 打开，所有 API 请求自动带上鉴权 */
+const URL_TOKEN = new URLSearchParams(location.search).get("token") || "";
+function api(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers || {});
+  if (URL_TOKEN) headers["Authorization"] = "Bearer " + URL_TOKEN;
+  return fetch(path, Object.assign({}, opts, { headers: headers }));
+}
+function mediaUrl(path) {
+  if (!URL_TOKEN) return path;
+  return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(URL_TOKEN);
+}
+
+const state = {
+  meta: null,
+  selectedGenre: "auto",
+  selectedMood: "auto",
+  mode: "simple",
+  currentSongId: null,
+  score: null,
+  pxb: 12,
+  bpm: 100,
+  pollTimer: null,
+  lastParams: null,   // 上次生成的参数（供 再来一版/延长 使用）
+  engines: {},        // 引擎可用性（/api/meta.engines）
+  refAudio: null,     // 已上传参考音频文件名（神经引擎风格迁移）
+  activeJobIds: [],   // 进行中的任务（供取消）
+  jobStartedAt: 0,
+};
+
+/* ================= 初始化 ================= */
+document.addEventListener("DOMContentLoaded", async () => {
+  bindEvents();
+  await loadMeta();
+  await refreshConfigBadge();
+  await refreshLibrary();
+});
+
+async function loadMeta() {
+  try {
+    state.meta = await (await api("/api/meta")).json();
+  } catch (e) {
+    console.error("meta 加载失败", e);
+    return;
+  }
+  buildChips($("genre-chips"), [{ id: "auto", label: "自动" }]
+    .concat(state.meta.genres), state.selectedGenre, (id) => { state.selectedGenre = id; });
+  buildChips($("mood-chips"), [{ id: "auto", label: "自动" }]
+    .concat(state.meta.moods), state.selectedMood, (id) => { state.selectedMood = id; });
+  fillSelect($("voice"), state.meta.voices || []);
+  fillSelect($("key-sel"), state.meta.keys || []);
+  if ($("sing-row") && state.meta.sing_supported === false) {
+    $("sing-row").classList.add("hidden");
+  }
+  // 神经歌声引擎可用性：不可用时禁用选项并提示安装方法
+  state.engines = (state.meta && state.meta.engines) || {};
+  const neural = state.engines.diffrhythm || {};
+  const opt = $("opt-diffrhythm");
+  if (opt) {
+    if (neural.available === false) {
+      opt.disabled = true;
+      opt.textContent = "🧠 神经歌声（未安装）";
+      opt.title = neural.reason || "运行 bash scripts/setup_neural.sh 安装";
+    } else if (neural.available === true) {
+      opt.title = neural.reason || "";
+    }
+  }
+  // 完整版 4m45s 开关：仅当 full 权重就绪时显示（onProviderChange 会再按引擎联动）
+  if ($("full-song-row")) {
+    $("full-song-row").classList.toggle("hidden", neural.full_available !== true);
+  }
+}
+
+const PROVIDER_BADGE = {
+  mock: "🧩 离线引擎",
+  llm: "🤖 大模型作曲",
+  diffrhythm: "🧠 神经歌声·真人演唱",
+};
+function providerBadge(provider) {
+  return PROVIDER_BADGE[provider] || "🧩 离线引擎";
+}
+function providerIcon(provider) {
+  return { mock: "🧩", llm: "🤖", diffrhythm: "🧠" }[provider] || "🧩";
+}
+
+function fillSelect(sel, items) {
+  sel.innerHTML = "";
+  items.forEach((it) => {
+    const o = document.createElement("option");
+    o.value = it.id;
+    o.textContent = it.label;
+    sel.appendChild(o);
+  });
+}
+
+function buildChips(container, items, activeId, onPick) {
+  container.innerHTML = "";
+  items.forEach((it) => {
+    const el = document.createElement("span");
+    el.className = "chip" + (it.id === activeId ? " active" : "");
+    el.textContent = it.label;
+    el.onclick = () => {
+      container.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+      el.classList.add("active");
+      onPick(it.id);
+    };
+    container.appendChild(el);
+  });
+}
+
+/* ================= 创作参数收集 ================= */
+function collectParams() {
+  const p = {
+    description: $("prompt").value.trim(),
+    genre: state.selectedGenre,
+    mood: state.selectedMood,
+    duration_sec: parseInt($("duration").value, 10),
+    bpm: parseInt($("bpm").value, 10) || null,
+    provider: $("provider").value,
+  };
+  if (state.mode === "advanced") {
+    p.title = $("title").value.trim() || null;
+    p.lyrics = $("lyrics").value.trim() || null;
+    p.lyrics_req = $("lyrics-req").value.trim() || null;
+    p.lead_voice = $("voice").value !== "auto" ? $("voice").value : null;
+    p.key = $("key-sel").value !== "auto" ? $("key-sel").value : null;
+    p.sing = !!$("sing").checked;
+  }
+  if (p.provider === "diffrhythm") {
+    if (state.refAudio) p.ref_audio = state.refAudio;
+    if ($("full-song") && $("full-song").checked) p.full_song = true;
+  }
+  return p;
+}
+
+/* ================= 生成流程 ================= */
+async function generate(overrides) {
+  const params = Object.assign(collectParams(), overrides || {});
+  if (!params.description && !params.lyrics && params.genre === "auto") {
+    params.description = "一段随机的心情小曲";
+  }
+  state.lastParams = params;
+  const btn = $("btn-generate");
+  btn.disabled = true;
+  showJob(true, "提交任务…", 0);
+
+  const dual = state.mode === "advanced" && $("dual").checked && !overrides;
+  try {
+    const ids = [];
+    if (dual) {
+      const seed = Math.floor(Math.random() * 1e9);
+      for (const k of [0, 1]) {
+        const resp = await api("/api/compose", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({}, params, { seed: seed + k * 7 })),
+        });
+        const data = await resp.json();
+        if (!data.job_id) throw new Error(data.error || "提交失败");
+        ids.push(data.job_id);
+      }
+    } else {
+      const resp = await api("/api/compose", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      });
+      const data = await resp.json();
+      if (!data.job_id) throw new Error(data.error || "提交失败");
+      ids.push(data.job_id);
+    }
+    state.activeJobIds = ids;
+    state.jobStartedAt = Date.now();
+    $("btn-job-cancel").classList.remove("hidden");
+    pollJobs(ids);
+  } catch (e) {
+    alert("出错了：" + e.message);
+    btn.disabled = false;
+    showJob(false);
+  }
+}
+
+async function cancelJob() {
+  const ids = state.activeJobIds || [];
+  for (const id of ids) {
+    try { await api("/api/jobs/" + id, { method: "DELETE" }); } catch (e) { /* 忽略 */ }
+  }
+}
+
+function pollJobs(jobIds) {
+  clearInterval(state.pollTimer);
+  state.pollTimer = setInterval(async () => {
+    try {
+      const jobs = [];
+      for (const id of jobIds) {
+        jobs.push(await (await api("/api/jobs/" + id)).json());
+      }
+      const done = jobs.filter((j) => j.status === "done");
+      const failed = jobs.filter((j) => j.status === "error");
+      const canceled = jobs.filter((j) => j.status === "canceled");
+      const running = jobs.filter((j) => !["done", "error", "canceled"].includes(j.status));
+      const avg = Math.round(jobs.reduce((s, j) => s + (j.progress || 0), 0) / jobs.length * 100);
+      let stage;
+      if (jobs.length > 1) {
+        stage = "版本 A：" + (jobs[0].stage_note || jobs[0].stage)
+          + " ／ 版本 B：" + (jobs[1].stage_note || jobs[1].stage);
+      } else {
+        stage = jobs[0].stage_note || jobs[0].stage;
+      }
+      // 神经渲染耗时展示（CPU 慢，给用户时间预期）
+      const neural = jobs.some((j) => j.stage === "singing_neural" && j.status === "running");
+      if (neural && state.jobStartedAt) {
+        const s = Math.floor((Date.now() - state.jobStartedAt) / 1000);
+        stage += "（已 " + Math.floor(s / 60) + " 分 " + (s % 60) + " 秒）";
+      }
+      showJob(true, stage, avg);
+
+      if (canceled.length === jobs.length) {
+        clearInterval(state.pollTimer);
+        state.activeJobIds = [];
+        $("btn-job-cancel").classList.add("hidden");
+        $("btn-generate").disabled = false;
+        showJob(false);
+      } else if (done.length === jobs.length) {
+        clearInterval(state.pollTimer);
+        state.activeJobIds = [];
+        $("btn-job-cancel").classList.add("hidden");
+        $("btn-generate").disabled = false;
+        setTimeout(() => showJob(false), 1200);
+        await loadSong(done[0].result.song_id, true);
+        await refreshLibrary();
+        if (done.length > 1) {
+          setTimeout(() => showJob(true, "✅ 两个候选版本都已生成，另一个在「作品目录」里", 100), 1400);
+          setTimeout(() => showJob(false), 5200);
+        }
+      } else if ((failed.length || canceled.length) && !running.length) {
+        clearInterval(state.pollTimer);
+        state.activeJobIds = [];
+        $("btn-job-cancel").classList.add("hidden");
+        $("btn-generate").disabled = false;
+        if (failed.length) showJob(true, "❌ " + (failed[0].error || "生成失败"), 100);
+        if (done.length) await loadSong(done[0].result.song_id, true);
+        setTimeout(() => { showJob(false); $("btn-generate").disabled = false; }, 4200);
+      }
+    } catch (e) { console.error(e); }
+  }, 700);
+}
+
+function showJob(show, text, pct) {
+  $("job-status").classList.toggle("hidden", !show);
+  if (text !== undefined) $("job-stage").textContent = text;
+  if (pct !== undefined) $("job-bar").style.width = pct + "%";
+}
+
+/* ================= AI 写词 ================= */
+async function aiLyrics() {
+  const btn = $("btn-ai-lyrics");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "✍️ 写词中…";
+  try {
+    const resp = await api("/api/lyrics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        description: $("prompt").value.trim() || $("title").value.trim(),
+        genre: state.selectedGenre,
+        mood: state.selectedMood,
+        lyrics_req: ($("lyrics-req") && $("lyrics-req").value.trim()) || null,
+      }),
+    });
+    const data = await resp.json();
+    if (data.lyrics) {
+      $("lyrics").value = data.lyrics;
+      btn.textContent = data.source === "llm" ? "✍️ 已写入(LLM)" : "✍️ 已写入(模板)";
+    } else {
+      btn.textContent = "❌ 失败";
+    }
+  } catch (e) {
+    btn.textContent = "❌ 失败";
+  }
+  setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 1800);
+}
+
+/* ================= AI 封面 ================= */
+function hashCode(s) {
+  let h = 0;
+  for (let i = 0; i < String(s).length; i++) h = (h * 31 + String(s).charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function makeCover(id, title, size) {
+  size = size || 120;
+  const c = document.createElement("canvas");
+  c.width = c.height = size * 2;
+  const x = c.getContext("2d");
+  x.scale(2, 2);
+  const h = hashCode(id);
+  const hue1 = h % 360;
+  const hue2 = (hue1 + 60 + (h >> 4) % 50) % 360;
+  const hue3 = (hue1 + 190) % 360;
+  const g = x.createLinearGradient(0, 0, size, size);
+  g.addColorStop(0, "hsl(" + hue1 + ",72%,52%)");
+  g.addColorStop(1, "hsl(" + hue2 + ",62%,30%)");
+  x.fillStyle = g;
+  x.fillRect(0, 0, size, size);
+  for (let i = 0; i < 4; i++) {
+    x.beginPath();
+    x.strokeStyle = "hsla(" + hue3 + ",85%,72%," + (0.5 - i * 0.11) + ")";
+    x.lineWidth = 1.6;
+    x.arc(size * (0.22 + ((h >> i) & 7) / 11), size * (0.24 + ((h >> (i + 2)) & 7) / 11),
+          size * 0.1 + ((h >> (i + 3)) & 3) * size * 0.055, 0, 7);
+    x.stroke();
+  }
+  for (let i = 0; i < 5; i++) {
+    const bh = size * (0.08 + ((h >> (i * 3)) & 7) / 16);
+    x.fillStyle = "rgba(255,255,255,0.5)";
+    x.fillRect(size * 0.14 + i * size * 0.12, size * 0.8 - bh, size * 0.06, bh);
+  }
+  if (title) {
+    x.fillStyle = "rgba(255,255,255,0.94)";
+    x.shadowColor = "rgba(0,0,0,0.45)";
+    x.shadowBlur = 4;
+    x.font = "600 " + Math.max(11, Math.round(size * 0.1)) + "px system-ui, 'PingFang SC'";
+    x.fillText(String(title).slice(0, size > 140 ? 10 : 6), size * 0.08, size * 0.93);
+  }
+  return c.toDataURL("image/png");
+}
+
+/* ================= 加载歌曲 ================= */
+async function loadSong(songId, autoplay) {
+  const data = await (await api("/api/songs/" + songId)).json();
+  if (!data.meta) return;
+  state.currentSongId = songId;
+  state.score = data.score;
+  state.bpm = data.score.bpm || 100;
+  const audioOnly = !!data.meta.audio_only
+    || !(data.score && data.score.melody && data.score.melody.length);
+
+  $("player-panel").classList.remove("hidden");
+  $("song-title").textContent = data.meta.title;
+  $("song-tags").innerHTML = [
+    labelOf("genres", data.meta.genre),
+    labelOf("moods", data.meta.mood),
+    keyLabel(data.spec),
+    data.meta.bpm + " BPM",
+    fmtTime(data.meta.duration_sec),
+    providerBadge(data.meta.provider),
+    data.spec.lyrics_source === "custom" ? "📝 自定义歌词" : "",
+    audioOnly ? "🎤 真声演唱" : (data.spec.sing ? "🎤 AI 演唱" : ""),
+  ].filter(Boolean).map((t, i) => `<span class="tag ${["", "cyan", "gold", "", "", "cyan", "", "gold"][i]}">${t}</span>`).join("");
+
+  const coverURL = makeCover(songId, data.meta.title, 150);
+  $("cover").src = coverURL;
+  $("dl-cover").href = coverURL;
+
+  state.currentFav = !!data.meta.favorite;
+  updateFavBtn();
+
+  const audio = $("audio");
+  audio.src = mediaUrl("/api/songs/" + songId + "/audio.wav");
+  $("dl-wav").href = mediaUrl("/api/songs/" + songId + "/audio.wav");
+  $("dl-wav").download = data.meta.title + ".wav";
+  // 神经演唱作品没有音符级曲谱/MIDI：隐藏不适用的入口
+  $("dl-midi").classList.toggle("hidden", audioOnly);
+  $("btn-regen").classList.toggle("hidden", audioOnly);
+  $("btn-extend").classList.toggle("hidden", audioOnly);
+  // 神经作品的"和声"分轨实为伴奏（demucs other 轨）
+  $("stem-harmony").textContent = audioOnly ? "伴奏" : "和声";
+  $("dl-midi").href = mediaUrl("/api/songs/" + songId + "/song.mid");
+  $("dl-midi").download = data.meta.title + ".mid";
+  $("dl-bundle").href = mediaUrl("/api/songs/" + songId + "/bundle.zip");
+  $("dl-bundle").download = data.meta.title + "-分享包.zip";
+  ["vocal", "harmony", "bass", "drums"].forEach((n) => {
+    const a = $("stem-" + n);
+    a.href = mediaUrl("/api/songs/" + songId + "/stems/" + n + ".wav");
+    a.download = data.meta.title + "-" + n + ".wav";
+  });
+  api("/api/songs/" + songId + "/stems/vocal.wav", { method: "HEAD" }).then((r) => {
+    document.querySelectorAll(".stem-link").forEach((a) => a.classList.toggle("disabled", !r.ok));
+  }).catch(() => {});
+
+  drawRoll();
+  rebuildLyrics();   // 切歌必须重建歌词索引（否则显示上一首的歌词）
+  updateLyric(0, true);
+  if (autoplay) { try { await audio.play(); } catch (e) { /* 自动播放被拦时忽略 */ }
+  }
+}
+
+function labelOf(kind, id) {
+  const list = (state.meta && state.meta[kind]) || [];
+  const found = list.find((x) => x.id === id);
+  return found ? found.label : id;
+}
+
+const MODE_ZH = { major: "大调", minor: "小调", dorian: "多利亚", chinese: "五声·宫", minor_pentatonic: "小调五声" };
+function keyLabel(spec) {
+  return spec.key + " " + (MODE_ZH[spec.mode] || spec.mode);
+}
+
+/* ================= 钢琴卷帘 ================= */
+function drawRoll() {
+  const score = state.score;
+  if (!score) return;
+  if (score.audio_only || !(score.melody && score.melody.length)) {
+    return drawRollLite();
+  }
+  $("roll-hint").textContent = "🎹 钢琴卷帘：紫=主旋律/人声 · 青=和声垫/琶音 · 金=贝斯 · 底部=鼓组。点击卷帘任意位置可跳转播放。";
+  const canvas = $("roll");
+  const dpr = window.devicePixelRatio || 1;
+  const pxb = Math.max(9, Math.min(26, ($("roll-wrap").clientWidth - 2) / score.total_beats));
+  state.pxb = pxb;
+  const W = Math.max($("roll-wrap").clientWidth - 2, score.total_beats * pxb);
+
+  const pitches = [];
+  score.melody.forEach((n) => pitches.push(n.pitch));
+  score.bass.forEach((n) => pitches.push(n.pitch));
+  score.arps.forEach((n) => pitches.push(n.pitch));
+  score.pads.forEach((n) => n.pitches.forEach((p) => pitches.push(p)));
+  const pMin = Math.max(28, Math.min(...pitches) - 2);
+  const pMax = Math.min(100, Math.max(...pitches) + 2);
+  const rowH = 7;
+  const rollH = (pMax - pMin + 1) * rowH;
+  const drumH = 58;
+  const labelH = 20;
+  const H = labelH + rollH + drumH + 6;
+
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const secColor = { intro: "#4a5578", verse: "#3d4a75", prechorus: "#54428a", chorus: "#6b3fa0", bridge: "#2f6b66", outro: "#3c4460" };
+  const bpb = score.beats_per_bar;
+
+  score.sections.forEach((sec) => {
+    const x = sec.start_beat * pxb;
+    const w = sec.beats * pxb;
+    ctx.fillStyle = secColor[sec.name] || "#3d4a75";
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(x, 0, w, H);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.font = "11px system-ui";
+    ctx.fillText(sec.label + " " + sec.bars + "小节", x + 5, 13);
+    ctx.strokeStyle = "rgba(255,255,255,.22)";
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  });
+
+  const totalBars = score.total_beats / bpb;
+  const chordStep = pxb < 13 ? 2 : 1;
+  for (let bar = 0; bar < totalBars; bar++) {
+    const x = bar * bpb * pxb;
+    ctx.strokeStyle = "rgba(255,255,255,.10)";
+    ctx.beginPath(); ctx.moveTo(x, labelH); ctx.lineTo(x, H); ctx.stroke();
+    if (bar % chordStep === 0 && score.chords[bar]) {
+      ctx.fillStyle = "rgba(160,235,255,.8)";
+      ctx.font = "10px system-ui";
+      ctx.fillText(score.chords[bar].symbol, x + 3, labelH + 10);
+    }
+  }
+
+  const yOf = (p) => labelH + (pMax - p) * rowH;
+
+  score.pads.forEach((n) => {
+    n.pitches.forEach((p) => {
+      ctx.fillStyle = "rgba(0,212,255,.16)";
+      ctx.fillRect(n.start * pxb, yOf(p) - rowH / 2 + 1, n.dur * pxb - 1, rowH - 2);
+    });
+  });
+  score.arps.forEach((n) => {
+    ctx.fillStyle = "rgba(0,212,255,.4)";
+    ctx.fillRect(n.start * pxb, yOf(n.pitch) - 2, Math.max(3, n.dur * pxb), 3.5);
+  });
+  score.stabs.forEach((n) => {
+    n.pitches.forEach((p) => {
+      ctx.fillStyle = "rgba(0,212,255,.34)";
+      ctx.fillRect(n.start * pxb, yOf(p) - 2.5, Math.max(3, n.dur * pxb), 4.5);
+    });
+  });
+  score.bass.forEach((n) => {
+    ctx.fillStyle = "rgba(255,200,87,.55)";
+    roundRect(ctx, n.start * pxb, yOf(n.pitch) - rowH / 2 + 1.5, Math.max(3, n.dur * pxb - 1), rowH - 3, 2);
+    ctx.fill();
+  });
+  score.melody.forEach((n) => {
+    const grad = ctx.createLinearGradient(0, yOf(n.pitch) - 4, 0, yOf(n.pitch) + 4);
+    grad.addColorStop(0, "#b39bff");
+    grad.addColorStop(1, "#7c5cff");
+    ctx.fillStyle = grad;
+    roundRect(ctx, n.start * pxb, yOf(n.pitch) - rowH / 2, Math.max(3.5, n.dur * pxb - 1.5), rowH, 2.5);
+    ctx.fill();
+  });
+
+  const drumTop = labelH + rollH + 4;
+  const drumRows = { kick: 0, snare: 1, clap: 1, rim: 1, hat: 2, ohat: 2 };
+  const drumColors = { kick: "#ff8f66", snare: "#ffd166", clap: "#ffd166", rim: "#e0e6ff", hat: "#8fd3ff", ohat: "#8fd3ff" };
+  ctx.strokeStyle = "rgba(255,255,255,.15)";
+  ctx.beginPath(); ctx.moveTo(0, drumTop - 2); ctx.lineTo(W, drumTop - 2); ctx.stroke();
+  score.drums.forEach((n) => {
+    const row = drumRows[n.type] !== undefined ? drumRows[n.type] : 3;
+    const x = n.start * pxb;
+    const y = drumTop + row * 16;
+    ctx.fillStyle = drumColors[n.type] || "#aaa";
+    ctx.globalAlpha = 0.35 + 0.65 * (n.vel / 127);
+    if (n.type === "kick") { ctx.beginPath(); ctx.arc(x + 2, y + 5, 3.4, 0, 7); ctx.fill(); }
+    else { ctx.fillRect(x, y + 1, 3.5, 8); }
+    ctx.globalAlpha = 1;
+  });
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  ctx.font = "10px system-ui";
+  ctx.fillText("🥁 鼓组", 5, drumTop + 44);
+}
+
+function drawRollLite() {
+  /* 神经演唱作品的轻量时间轴：段落色带 + 每段首句歌词（无音符级曲谱） */
+  const score = state.score;
+  const canvas = $("roll");
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max($("roll-wrap").clientWidth - 2, 600);
+  const H = 104;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const bpb = score.beats_per_bar || 4;
+  const pxb = Math.max(9, Math.min(26, W / Math.max(1, score.total_beats)));
+  state.pxb = pxb;
+  const secColor = { intro: "#4a5578", verse: "#3d4a75", prechorus: "#54428a", chorus: "#6b3fa0", bridge: "#2f6b66", outro: "#3c4460" };
+
+  score.sections.forEach((sec) => {
+    const x = sec.start_beat * pxb;
+    const w = sec.beats * pxb;
+    ctx.fillStyle = secColor[sec.name] || "#3d4a75";
+    ctx.globalAlpha = 0.45;
+    ctx.fillRect(x, 0, w, H);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(255,255,255,.85)";
+    ctx.font = "11px system-ui";
+    ctx.fillText(sec.label + " " + sec.bars + "小节", x + 5, 14);
+    const firstLyric = (sec.lyrics || []).find((t) => t && t.trim());
+    if (firstLyric) {
+      ctx.fillStyle = "rgba(255,255,255,.66)";
+      ctx.font = "10px system-ui";
+      ctx.fillText(String(firstLyric).slice(0, Math.max(4, Math.floor(w / 11))), x + 5, 30);
+    }
+    ctx.strokeStyle = "rgba(255,255,255,.22)";
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  });
+
+  ctx.fillStyle = "rgba(255,255,255,.4)";
+  ctx.font = "10px system-ui";
+  ctx.fillText("🎧 神经歌声演唱 · 段落与歌词时间轴（无音符级曲谱）", 5, H - 8);
+  $("roll-hint").textContent = "🎧 神经歌声作品：展示段落结构与歌词时间轴，点击任意位置跳转播放；MIDI/分轨/换副歌不适用于此类作品。";
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* ================= 播放器 ================= */
+function bindPlayer() {
+  const audio = $("audio");
+  const playBtn = $("btn-play");
+  playBtn.onclick = () => { audio.paused ? audio.play() : audio.pause(); };
+  audio.onplay = () => {
+    playBtn.textContent = "⏸";
+    ensureGraph();
+    if (actx && actx.state === "suspended") actx.resume();
+    raf();
+  };
+  audio.onpause = () => { playBtn.textContent = "▶"; drawSpectrum(); };
+  audio.ontimeupdate = () => {
+    const dur = audio.duration || (state.score ? state.score.duration_sec : 1);
+    $("seek-fill").style.width = (audio.currentTime / dur * 100) + "%";
+    $("time-label").textContent = fmtTime(audio.currentTime) + " / " + fmtTime(dur);
+    const beat = audio.currentTime * state.bpm / 60;
+    $("playhead").style.transform = "translateX(" + (beat * state.pxb) + "px)";
+    updateLyric(beat);
+  };
+  audio.onended = () => { playBtn.textContent = "▶"; drawSpectrum(); };
+
+  $("seek").onclick = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = (e.clientX - rect.left) / rect.width;
+    const dur = audio.duration || (state.score ? state.score.duration_sec : 0);
+    if (dur) audio.currentTime = ratio * dur;
+  };
+  $("roll-wrap").onclick = (e) => {
+    if (e.target.id !== "roll") return;
+    const rect = $("roll").getBoundingClientRect();
+    const beat = (e.clientX - rect.left) / state.pxb;
+    audio.currentTime = Math.max(0, beat * 60 / state.bpm - 0.01);
+  };
+}
+
+let lyricBars = [];
+let lyricEvents = [];  // Whisper 对齐后的歌词真实时间轴（神经作品）
+function rebuildLyrics() {
+  lyricBars = [];
+  lyricEvents = [];
+  if (!state.score) return;
+  if (state.score.lyric_events && state.score.lyric_events.length) {
+    lyricEvents = state.score.lyric_events
+      .slice().sort((a, b) => a[0] - b[0])
+      .map((e) => ({ start: e[0], end: e[1], text: e[2] }));
+    return;
+  }
+  state.score.sections.forEach((sec) => {
+    (sec.lyrics || []).forEach((text, i) => {
+      if (text) lyricBars.push({ bar: sec.start_bar + i, text });
+    });
+  });
+}
+function updateLyric(beat, force) {
+  if (!lyricBars.length && !lyricEvents.length && !force) rebuildLyrics();
+  let text = "";
+  if (lyricEvents.length) {
+    // Whisper 精确时间轴：按播放秒数对齐（时间轴有 0.15s 提前量，体验更像跟唱）
+    const now = ($("audio") && $("audio").currentTime) || 0;
+    for (const it of lyricEvents) { if (it.start <= now + 0.15) text = it.text; else break; }
+  } else {
+    const bar = Math.floor(beat / (state.score ? state.score.beats_per_bar : 4));
+    for (const it of lyricBars) { if (it.bar <= bar) text = it.text; else break; }
+  }
+  if (force || $("lyric-now").textContent !== (text || "♪")) {
+    $("lyric-now").textContent = text || "♪";
+  }
+}
+
+/* ================= 频谱可视化 ================= */
+let actx = null, analyser = null, freqData = null;
+function ensureGraph() {
+  if (actx) return;
+  try {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = actx.createMediaElementSource($("audio"));
+    analyser = actx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.78;
+    src.connect(analyser);
+    analyser.connect(actx.destination);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+  } catch (e) { console.warn("频谱初始化失败", e); }
+}
+
+function drawSpectrum() {
+  const c = $("spectrum");
+  if (!c) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth || 600, H = c.clientHeight || 46;
+  if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const playing = !$("audio").paused && analyser;
+  if (playing) analyser.getByteFrequencyData(freqData);
+  const n = 56;
+  for (let i = 0; i < n; i++) {
+    let v;
+    if (playing) v = freqData[Math.floor(i * freqData.length / n * 0.72)] / 255;
+    else v = 0.05 + 0.03 * Math.sin(Date.now() / 500 + i * 0.6);
+    const h = Math.max(2, v * H);
+    const grad = ctx.createLinearGradient(0, H - h, 0, H);
+    grad.addColorStop(0, "#61e8ff");
+    grad.addColorStop(1, "#7c5cff");
+    ctx.fillStyle = grad;
+    ctx.fillRect(i * W / n + W / n * 0.18, H - h, W / n * 0.6, h);
+  }
+}
+
+function raf() {
+  const audio = $("audio");
+  if (audio.paused) { drawSpectrum(); return; }
+  const wrap = $("roll-wrap");
+  const x = audio.currentTime * state.bpm / 60 * state.pxb;
+  if (x < wrap.scrollLeft + 40 || x > wrap.scrollLeft + wrap.clientWidth - 80) {
+    wrap.scrollLeft = x - wrap.clientWidth * 0.4;
+  }
+  drawSpectrum();
+  requestAnimationFrame(raf);
+}
+
+function fmtTime(s) {
+  s = Math.max(0, Math.round(s || 0));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
+/* ================= 收藏 / 改名 / 换副歌 / MV 导出 ================= */
+function updateFavBtn() {
+  const btn = $("btn-fav");
+  btn.textContent = state.currentFav ? "★ 已收藏" : "☆ 收藏";
+  btn.classList.toggle("active", !!state.currentFav);
+}
+
+async function toggleFav() {
+  const id = state.currentSongId;
+  if (!id) return;
+  const fav = !state.currentFav;
+  await api("/api/songs/" + id + "/favorite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ favorite: fav }),
+  });
+  state.currentFav = fav;
+  updateFavBtn();
+  refreshLibrary();
+}
+
+async function renameSong() {
+  const id = state.currentSongId;
+  if (!id) return;
+  const t = prompt("新歌名：", $("song-title").textContent);
+  if (!t || !t.trim()) return;
+  const resp = await api("/api/songs/" + id, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: t.trim() }),
+  });
+  if (resp.ok) {
+    $("song-title").textContent = t.trim();
+    refreshLibrary();
+  } else {
+    const e = await resp.json().catch(() => ({}));
+    alert(e.error || "改名失败");
+  }
+}
+
+async function regenChorus() {
+  const id = state.currentSongId;
+  if (!id) return;
+  const btn = $("btn-regen");
+  btn.disabled = true;
+  btn.textContent = "🎼 重写副歌中…";
+  try {
+    const resp = await api("/api/songs/" + id + "/regen_chorus", { method: "POST" });
+    const d = await resp.json();
+    if (d.song_id) {
+      await loadSong(d.song_id, true);
+      await refreshLibrary();
+    } else {
+      alert(d.error || "换副歌失败");
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🎼 换副歌";
+  }
+}
+
+async function mvExport() {
+  const id = state.currentSongId;
+  if (!id) return;
+  const btn = $("btn-mv");
+  btn.disabled = true;
+  btn.textContent = "🎬 合成中…";
+  try {
+    const r = await api("/api/songs/" + id + "/video.mp4");
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error(e.error || "导出失败");
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = ($("song-title").textContent || "mv") + ".mp4";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🎬 MV";
+  }
+}
+
+/* ================= 曲库 ================= */
+async function refreshLibrary() {
+  const data = await (await api("/api/songs")).json();
+  state.songs = data.songs;
+  renderLibrary();
+}
+
+function renderLibrary() {
+  const list = $("song-list");
+  const q = (($("lib-search") && $("lib-search").value) || "").trim().toLowerCase();
+  const songs = (state.songs || []).filter((s) => !q
+    || [s.title, s.genre, s.mood, labelOf("genres", s.genre), labelOf("moods", s.mood)]
+      .join(" ").toLowerCase().includes(q));
+  if ($("lib-count")) {
+    const total = (state.songs || []).length;
+    $("lib-count").textContent = total ? (q ? songs.length + " / " + total : "共 " + total + " 首") : "";
+  }
+  list.innerHTML = "";
+  if (!songs.length) {
+    list.innerHTML = '<div class="empty">' + (q ? "没有匹配的作品" : "还没有作品，快去生成第一首吧 ✨") + "</div>";
+    return;
+  }
+  songs.forEach((song) => {
+    const item = document.createElement("div");
+    item.className = "song-item" + (song.favorite ? " fav" : "");
+    const when = new Date(song.created_at * 1000);
+    item.innerHTML = `
+      <img class="lib-cover" alt="" src="${makeCover(song.id, song.title, 44)}">
+      <div class="song-item-body">
+        <div class="t">${song.favorite ? "★ " : ""}${escapeHtml(song.title)}</div>
+        <div class="meta">
+          <span>${labelOf("genres", song.genre)}</span>
+          <span>${labelOf("moods", song.mood)}</span>
+          <span>${song.bpm} BPM</span>
+          <span>${fmtTime(song.duration_sec)}</span>
+          <span>${providerIcon(song.provider)}</span>
+          <span>${song.sing ? "🎤" : ""}</span>
+          <span>${when.getMonth() + 1}/${when.getDate()} ${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}</span>
+        </div>
+      </div>
+      <span class="del" title="删除">✕</span>`;
+    item.onclick = () => loadSong(song.id, true);
+    item.querySelector(".del").onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm("删除《" + song.title + "》？")) return;
+      await api("/api/songs/" + song.id, { method: "DELETE" });
+      if (state.currentSongId === song.id) {
+        $("audio").pause();
+        $("player-panel").classList.add("hidden");
+        state.currentSongId = null;
+      }
+      refreshLibrary();
+    };
+    list.appendChild(item);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ================= 设置 ================= */
+async function openSettings() {
+  const cfg = await (await api("/api/config")).json();
+  $("cfg-enabled").checked = !!cfg.llm.enabled;
+  $("cfg-base-url").value = cfg.llm.base_url || "";
+  $("cfg-model").value = cfg.llm.model || "";
+  $("cfg-key").value = "";
+  $("cfg-key").placeholder = cfg.llm.api_key_set ? ("已保存: " + cfg.llm.api_key_masked) : "粘贴 API Key";
+  $("cfg-status").textContent = "配置来源: " + (cfg.source || "default");
+  $("cfg-test-result").classList.add("hidden");
+  $("cfg-test-result").className = "cfg-test-result hidden";
+  const neural = (state.engines && state.engines.diffrhythm) || {};
+  $("cfg-neural-status").textContent = neural.available
+    ? "✅ " + (neural.reason || "就绪") + " · 采样步数 " + neural.steps
+    : "❌ " + (neural.reason || "未安装（bash scripts/setup_neural.sh）");
+  $("settings-modal").classList.remove("hidden");
+}
+
+async function testConfig() {
+  const btn = $("cfg-test");
+  const result = $("cfg-test-result");
+  btn.disabled = true;
+  btn.textContent = "…";
+  result.classList.remove("hidden", "ok", "fail");
+
+  const body = {
+    llm: {
+      enabled: $("cfg-enabled").checked,
+      base_url: $("cfg-base-url").value.trim(),
+      model: $("cfg-model").value.trim(),
+    },
+  };
+  const key = $("cfg-key").value.trim();
+  if (key) body.llm.api_key = key;
+
+  try {
+    const resp = await api("/api/config/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      result.className = "cfg-test-result ok";
+      result.textContent = "✅ 连接成功！模型: " + data.model + " · 耗时 " + data.elapsed_ms + "ms · 回复: " + (data.reply_preview || "(空)");
+    } else {
+      result.className = "cfg-test-result fail";
+      result.textContent = "❌ " + (data.reason || "未知错误") + (data.base_url ? " · " + data.base_url : "");
+    }
+  } catch (e) {
+    result.className = "cfg-test-result fail";
+    result.textContent = "❌ 网络错误: " + e.message;
+  }
+  btn.disabled = false;
+  btn.textContent = "🔌 测试连接";
+}
+
+async function saveSettings() {
+  const body = {
+    llm: {
+      enabled: $("cfg-enabled").checked,
+      base_url: $("cfg-base-url").value.trim() || undefined,
+      model: $("cfg-model").value.trim() || undefined,
+    },
+  };
+  const key = $("cfg-key").value.trim();
+  if (key) body.llm.api_key = key;
+  const resp = await api("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const cfg = await resp.json();
+  $("cfg-status").textContent = "✅ 已保存（来源: " + cfg.source + "）";
+  await refreshConfigBadge();
+  setTimeout(() => $("settings-modal").classList.add("hidden"), 900);
+}
+
+async function refreshConfigBadge() {
+  try {
+    const cfg = await (await api("/api/config")).json();
+    const badge = $("llm-badge");
+    if (cfg.llm.enabled) {
+      badge.textContent = "LLM: " + cfg.llm.model + " ✓";
+      badge.classList.add("on");
+    } else {
+      badge.textContent = "LLM 未配置（用离线引擎）";
+      badge.classList.remove("on");
+    }
+  } catch (e) { console.error(e); }
+}
+
+/* ================= 神经引擎：参考音频 / 选项联动 ================= */
+function onProviderChange() {
+  const neural = $("provider").value === "diffrhythm";
+  $("ref-audio-row").classList.toggle("hidden", !neural);
+  $("ref-audio-hint").classList.toggle("hidden", !neural);
+  // 完整版开关：神经引擎 + full 权重就绪才显示
+  const fullOk = state.engines && state.engines.diffrhythm
+    && state.engines.diffrhythm.full_available === true;
+  $("full-song-row").classList.toggle("hidden", !neural || !fullOk);
+  // 神经引擎自动决定音色/调性/演唱方式
+  $("voice").disabled = neural;
+  $("key-sel").disabled = neural;
+  $("sing").disabled = neural;
+}
+
+async function uploadRefAudio() {
+  const inp = $("ref-audio-file");
+  const f = inp.files && inp.files[0];
+  if (!f) {
+    alert("请先选择音频文件（wav / mp3 / flac，建议 ≥10 秒）");
+    return;
+  }
+  const btn = $("btn-ref-upload");
+  btn.disabled = true;
+  btn.textContent = "⬆ 上传中…";
+  try {
+    const resp = await api("/api/ref-audio", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: f,
+    });
+    const d = await resp.json();
+    if (d.ref_audio) {
+      state.refAudio = d.ref_audio;
+      $("ref-audio-name").textContent = "✅ " + f.name;
+    } else {
+      alert(d.error || "上传失败");
+    }
+  } catch (e) {
+    alert("上传失败：" + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = "⬆ 上传";
+}
+
+/* ================= 事件绑定 ================= */
+function setMode(mode) {
+  state.mode = mode;
+  const adv = mode === "advanced";
+  $("tab-simple").classList.toggle("active", !adv);
+  $("tab-advanced").classList.toggle("active", adv);
+  $("panel-simple").classList.toggle("hidden", adv);
+  $("panel-adv-req").classList.toggle("hidden", !adv);
+  $("panel-adv-lyrics").classList.toggle("hidden", !adv);
+  $("advanced-extra").classList.toggle("hidden", !adv);
+}
+
+function bindEvents() {
+  bindPlayer();
+  $("btn-generate").onclick = () => generate();
+  $("btn-inspire").onclick = () => {
+    const list = (state.meta && state.meta.inspirations) || [];
+    $("prompt").value = list[Math.floor(Math.random() * list.length)] || "";
+  };
+  $("tab-simple").onclick = () => setMode("simple");
+  $("tab-advanced").onclick = () => setMode("advanced");
+  $("btn-ai-lyrics").onclick = aiLyrics;
+  $("duration").oninput = (e) => { $("dur-val").textContent = e.target.value + "s"; };
+  $("bpm").oninput = (e) => { $("bpm-val").textContent = +e.target.value === 0 ? "自动" : e.target.value; };
+
+  $("btn-remix").onclick = () => generate({ seed: Date.now() % 1e9 });
+  $("btn-extend").onclick = () => {
+    const base = state.lastParams || collectParams();
+    generate({
+      seed: base.seed !== undefined && base.seed !== null ? base.seed : undefined,
+      duration_sec: Math.min(180, (base.duration_sec || 30) + 30),
+    });
+  };
+  $("btn-fav").onclick = toggleFav;
+  $("btn-rename").onclick = renameSong;
+  $("btn-regen").onclick = regenChorus;
+  $("btn-mv").onclick = mvExport;
+  $("lib-search").oninput = renderLibrary;
+  window.addEventListener("resize", () => {
+    if (state.score) drawRoll();
+    drawSpectrum();
+  });
+
+  $("btn-settings").onclick = openSettings;
+  $("cfg-cancel").onclick = () => $("settings-modal").classList.add("hidden");
+  $("cfg-save").onclick = saveSettings;
+  $("cfg-test").onclick = testConfig;
+  $("btn-job-cancel").onclick = cancelJob;
+  $("provider").onchange = onProviderChange;
+  $("btn-ref-upload").onclick = uploadRefAudio;
+  onProviderChange();
+  $("settings-modal").onclick = (e) => {
+    if (e.target.id === "settings-modal") $("settings-modal").classList.add("hidden");
+  };
+  window.addEventListener("resize", () => { if (state.score) drawRoll(); });
+}
