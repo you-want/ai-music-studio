@@ -73,8 +73,11 @@
 4. **音色一致性（Personas 平替）**：把某首歌的 style 嵌入向量缓存复用（`vocal.npy` 同机制）
 5. **神经作品的分轨**：接 Demucs v4（本地源分离，CPU 约 1–3 分钟/首）→ 神经歌曲也有 stems
 6. **声音克隆**：开源可商用方案有限（OpenVoice2 MIT / XTTS-v2 Coqui 许可），接位已留（AudioProvider 之外再加 VoiceProvider）
-7. **时间线编辑器**：Web Audio 波形 + 段落重排（器乐引擎已具备音符级数据）
-8. **GPU 服务器路线**：ACE-Step 1.5（MIT）或 DiffRhythm2（2025-10 发布，块级自回归流匹配，24kHz VAE，约 210s）；Dockerfile 已可扩展 CUDA 基础镜像
+7. ~~重唱某一段（Replace Section）~~ → v5 已完成（DiffRhythm edit 模式：区间外写回原曲 latent）
+8. **时间线编辑器**：Web Audio 波形 + 段落重排（器乐引擎已具备音符级数据）
+9. **云端付费 API**：~~Mureka 官方 REST~~ → v5 已接入（~$0.05/首含商用授权）；Suno 第三方代理判定规避（合规风险）
+10. **引擎观察名单**：YuE2-3B（audio.cpp GGUF 可 CPU，但权重 CC BY-NC 需评估）、HeartMuLa（Apache-2.0）、DiffRhythm 2（约 210s）
+11. **GPU 服务器路线**：ACE-Step 1.5（MIT，自托管可低至每首几美分）；Dockerfile 已可扩展 CUDA 基础镜像
 9. **声源更干净的翻唱 Covers**：DiffRhythm `--edit` 模式（保留旋律换段歌词/风格），本仓库 infer.py 已含 edit 分支，待产品化
 
 ## 4. 服务化与安全（生产加固清单，v4 已实施）
