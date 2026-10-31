@@ -3,6 +3,8 @@
 v4：音频成品类 Provider（DiffRhythm 本地神经歌声）走独立旁路——
 作曲仍由 LLM/Mock 产出歌词与结构，但渲染交给神经模型子进程，
 产出 95s 真人声演唱 WAV；支持任务取消（DELETE /api/jobs/{id}）。
+v5：多音频 Provider（本地 DiffRhythm 常驻 worker / 云端 Mureka）、
+音色 Persona（embedding 下发）、分段重唱（edit 旁路）、专辑批量。
 """
 import os
 import shutil
@@ -11,9 +13,10 @@ import time
 import uuid
 import wave
 
-from . import schemas, store as store_mod
+from . import personas, schemas, store as store_mod
 from .music import midi, mock_composer, realizer, singer, synth
 from .providers import llm as llm_provider
+from .providers import mureka as mureka_provider
 from .providers.audio_base import CancelledError
 from .providers.diffrhythm import align as neural_align
 from .providers.diffrhythm import build_lyric_lines as neural_lyric_lines
@@ -29,15 +32,15 @@ STAGES_ZH = {
     "arranging": "正在编曲与生成旋律…",
     "rendering": "正在渲染音频与分轨…",
     "stems": "正在导出分轨…",
-    "singing_neural": "🧠 神经歌声渲染中…（CPU 约 15-30 分钟）",
+    "singing_neural": "🧠 歌声渲染中…",
     "done": "完成",
     "error": "出错",
     "canceled": "已取消",
 }
 
 MAX_RENDER_SLOTS = 2      # 本地渲染同时上限（防内存挤爆），其余排队
-MAX_NEURAL_SLOTS = 1      # 神经模型同时上限（模型占 6-8GB 内存）
-AUDIO_PROVIDERS = {"diffrhythm"}  # 未来的云 API（Mureka/Suno）加入此集合即可
+MAX_NEURAL_SLOTS = 1      # 神经模型同时上限（模型占 ~10GB 内存）
+AUDIO_PROVIDERS = {"diffrhythm", "mureka"}
 
 
 def _wav_duration(path):
@@ -110,9 +113,14 @@ class JobManager:
     def _run(self, job, req, fp=None):
         ev = self._cancel_events.get(job["id"])
         try:
+            # 分段重唱：服务端已构建完整 spec，不走作曲
+            if req.get("edit_of"):
+                self._run_edit(job, req, fp, ev)
+                return
+
             job.update(status="running", stage="composing", stage_note=STAGES_ZH["composing"])
             if req.get("provider") in AUDIO_PROVIDERS:
-                # 神经引擎固定产出 95s（或全曲 285s）：作曲按此时长铺排歌词结构
+                # 音频类引擎固定产出 95s（或全曲 285s）：作曲按此时长铺排歌词结构
                 req["duration_sec"] = neural_resolve_length(req)
             spec, info = self._compose(req)
             if spec is None:
@@ -169,12 +177,30 @@ class JobManager:
         if sid and not self.store.exists(sid):
             shutil.rmtree(self.store.song_dir(sid), ignore_errors=True)
 
+    def _audio_provider(self, name):
+        if name == "mureka":
+            return mureka_provider.provider
+        return diffrhythm_provider
+
+    def _resolve_persona(self, req):
+        """persona_id -> 嵌入 .npy 绝对路径（注入 req.style_prompt_npy）。"""
+        if req.get("persona_id"):
+            path = personas.embedding_path(self.store, req["persona_id"])
+            if not path:
+                raise RuntimeError("音色 Persona 不存在或已删除")
+            req["style_prompt_npy"] = path
+
     def _run_audio(self, job, req, spec, info, fp, ev):
-        """音频成品 Provider 旁路：作曲结果(歌词/结构) -> 神经模型演唱。"""
+        """音频成品 Provider 旁路：作曲结果(歌词/结构) -> 模型/云端演唱。"""
         spec["provider"] = req.get("provider")
         spec["audio_only"] = True
         spec.pop("lead_voice", None)  # 音色由模型决定
-        job.update(stage_note="等待神经渲染槽位…（同时只跑 %d 首）" % MAX_NEURAL_SLOTS)
+        self._resolve_persona(req)
+        provider = self._audio_provider(req.get("provider"))
+        ok, reason = provider.available()
+        if not ok:
+            raise RuntimeError("引擎不可用: %s" % reason)
+        job.update(stage_note="等待渲染槽位…（同时只跑 %d 首）" % MAX_NEURAL_SLOTS)
         with self._neural_slot:
             self._check_cancel(ev)
             job.update(stage="singing_neural", stage_note=STAGES_ZH["singing_neural"],
@@ -184,6 +210,33 @@ class JobManager:
             job.update(song_id=song_id)
             if req.get("ref_audio"):
                 req["ref_audio_path"] = self._resolve_ref_audio(req["ref_audio"])
+            provider.generate(
+                req, spec, self.store.wav_path(song_id),
+                progress_cb=lambda f, note="": job.update(
+                    progress=0.04 + 0.86 * f,
+                    stage_note=note or STAGES_ZH["singing_neural"]),
+                cancel_event=ev)
+            self._check_cancel(ev)
+            score = self._postprocess_audio(job, req, spec, song_id, ev)
+        meta = self.store.save(song_id, spec, score, fingerprint=fp)
+        self._done(job, meta, req.get("provider", "diffrhythm"))
+
+    def _run_edit(self, job, req, fp, ev):
+        """分段重唱：原曲为参考 latent，指定区间按新歌词重采样（其余原样保留）。"""
+        spec = req.get("edit_spec")
+        if not isinstance(spec, dict) or not spec.get("structure"):
+            raise RuntimeError("重唱任务缺少原曲信息")
+        spec["provider"] = "diffrhythm"
+        spec["audio_only"] = True
+        self._resolve_persona(req)
+        job.update(stage_note="等待神经渲染槽位…（同时只跑 %d 首）" % MAX_NEURAL_SLOTS)
+        with self._neural_slot:
+            self._check_cancel(ev)
+            job.update(stage="singing_neural", stage_note=STAGES_ZH["singing_neural"],
+                       progress=0.04)
+            song_id = self.store.new_song_id()
+            self.store.prepare(song_id)
+            job.update(song_id=song_id)
             diffrhythm_provider.generate(
                 req, spec, self.store.wav_path(song_id),
                 progress_cb=lambda f, note="": job.update(
@@ -191,31 +244,33 @@ class JobManager:
                     stage_note=note or STAGES_ZH["singing_neural"]),
                 cancel_event=ev)
             self._check_cancel(ev)
-            wav = self.store.wav_path(song_id)
-            duration = _wav_duration(wav)
-            lines = neural_lyric_lines(
-                spec, max_sec=neural_resolve_length(req) - 2)
-            # ① Whisper 强制对齐：每句歌词的真实起止时间（失败退回小节时间轴）
-            score = None
-            if neural_has_module("faster_whisper", wait=True) is True:
-                job.update(stage_note="🎧 对齐歌词时间轴（Whisper）…", progress=0.92)
-                events = neural_align(
-                    wav, lines,
-                    progress_cb=lambda f, note="": job.update(progress=0.92 + 0.03 * f))
-                score = neural_lite_score(spec, duration, lyric_events=events)
-            # ② Demucs 源分离：人声/鼓/贝斯/伴奏 4 分轨（失败不影响成品）
-            if neural_has_module("demucs", wait=True) is True:
-                job.update(stage_note="🎚 分离分轨（Demucs）…", progress=0.96)
-                try:
-                    neural_separate(
-                        wav, self.store.song_dir(song_id),
-                        progress_cb=lambda f, note="": job.update(progress=0.96 + 0.03 * f))
-                except Exception as e:  # noqa: BLE001
-                    job.update(stage_note="分轨失败（不影响成品）: %s" % str(e)[:80])
-            if score is None:
-                score = neural_lite_score(spec, duration)
+            score = self._postprocess_audio(job, req, spec, song_id, ev)
         meta = self.store.save(song_id, spec, score, fingerprint=fp)
-        self._done(job, meta, "diffrhythm")
+        self._done(job, meta, "diffrhythm-edit")
+
+    def _postprocess_audio(self, job, req, spec, song_id, ev):
+        """音频作品统一后处理：Whisper 对齐 + Demucs 分轨 + lite 曲谱。"""
+        wav = self.store.wav_path(song_id)
+        duration = _wav_duration(wav)
+        lines = neural_lyric_lines(spec, max_sec=neural_resolve_length(req) - 2)
+        score = None
+        # ① Whisper 强制对齐：每句歌词的真实起止时间（失败退回小节时间轴）
+        if neural_has_module("faster_whisper", wait=True) is True:
+            job.update(stage_note="🎧 对齐歌词时间轴（Whisper）…", progress=0.92)
+            events = neural_align(
+                wav, lines,
+                progress_cb=lambda f, note="": job.update(progress=0.92 + 0.03 * f))
+            score = neural_lite_score(spec, duration, lyric_events=events)
+        # ② Demucs 源分离：人声/鼓/贝斯/伴奏 4 分轨（失败不影响成品）
+        if neural_has_module("demucs", wait=True) is True:
+            job.update(stage_note="🎚 分离分轨（Demucs）…", progress=0.96)
+            try:
+                neural_separate(
+                    wav, self.store.song_dir(song_id),
+                    progress_cb=lambda f, note="": job.update(progress=0.96 + 0.03 * f))
+            except Exception as e:  # noqa: BLE001
+                job.update(stage_note="分轨失败（不影响成品）: %s" % str(e)[:80])
+        return score or neural_lite_score(spec, duration)
 
     def _resolve_ref_audio(self, name):
         """参考音频名（服务端生成存于 output/_refs/）-> 绝对路径。"""
@@ -241,7 +296,7 @@ class JobManager:
     def _compose(self, req):
         """按 provider 选择：auto = LLM(启用时) 优先、失败回落 mock；
         显式选 llm 但没配置 / 失败则直接报错（不静默降级）。
-        音频类引擎（diffrhythm）复用 auto 逻辑做作曲，渲染阶段另行旁路。"""
+        音频类引擎（diffrhythm/mureka）复用 auto 逻辑做作曲，渲染阶段另行旁路。"""
         mode = req.get("provider") or "auto"
         cfg = self._get_config()
         llm_cfg = cfg.get("llm", {})

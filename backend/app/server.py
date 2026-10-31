@@ -23,7 +23,11 @@ _BACK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACK not in sys.path:
     sys.path.insert(0, _BACK)
 
+import copy  # noqa: E402
+
+from app import personas as persona_store  # noqa: E402
 from app import schemas  # noqa: E402
+from app.providers import mureka as mureka_provider  # noqa: E402
 from app.jobs import JobManager  # noqa: E402
 from app.music import coverpng, midi, mock_composer, realizer, singer, synth, theory  # noqa: E402
 from app.providers import diffrhythm as diffrhythm_provider  # noqa: E402
@@ -198,11 +202,26 @@ class Handler(BaseHTTPRequestHandler):
                                    "无标记时自动分配",
                     "sing_supported": singer.available_voice() is not None,
                     "inspirations": INSPIRATIONS,
-                    "engines": {"diffrhythm": diffrhythm_provider.provider.engine_info()},
+                    "engines": {"diffrhythm": diffrhythm_provider.provider.engine_info(),
+                                "mureka": mureka_provider.provider.engine_info()},
                     "defaults": {"duration_sec": 30, "provider": "auto"},
                 })
             if path == "/api/ref-audio" and method == "POST":
                 return self._ref_audio_upload()
+            if path == "/api/personas" and method == "GET":
+                return self._send(200, {"personas": persona_store.list_personas(STATE.lib)})
+            if path == "/api/personas" and method == "POST":
+                return self._persona_create()
+            m = re.match(r"^/api/personas/([\w-]+)$", path)
+            if m and method == "DELETE":
+                return self._send(200, {"deleted": persona_store.delete(STATE.lib, m.group(1))})
+            if path == "/api/album" and method == "POST":
+                return self._album_create()
+            if path == "/api/album.zip" and method == "GET":
+                return self._album_zip(query)
+            m = re.match(r"^/api/songs/([\w-]+)/reseg$", path)
+            if m and method == "POST":
+                return self._reseg(m.group(1))
             if path == "/api/lyrics" and method == "POST":
                 req = schemas.parse_request(self._json_body())
                 text, source = None, "mock"
@@ -215,12 +234,7 @@ class Handler(BaseHTTPRequestHandler):
                     text = mock_composer.mock_lyrics_text(req)
                 return self._send(200, {"lyrics": text, "source": source})
             if path == "/api/config" and method == "GET":
-                llm = dict(STATE.config["llm"])
-                key = llm.get("api_key") or ""
-                llm["api_key_set"] = bool(key)
-                llm["api_key_masked"] = (key[:4] + "****" + key[-2:]) if len(key) > 8 else ("****" if key else "")
-                llm.pop("api_key", None)
-                return self._send(200, {"llm": llm, "source": STATE.config["source"]})
+                return self._api_config_get()
             if path == "/api/config" and method == "POST":
                 body = self._json_body()
                 llm_now = dict(STATE.config["llm"])
@@ -232,6 +246,8 @@ class Handler(BaseHTTPRequestHandler):
                         llm_now[k] = v
                 with STATE.config_lock:
                     STATE.config = llm_provider.save_config(STATE.config_path, llm_now)
+                    if body.get("mureka"):
+                        self._save_mureka(STATE.config_path, body["mureka"])
                 return self._api_config_get()
             if path == "/api/config/test" and method == "POST":
                 # 测试 LLM 连接：发一条最小 chat 请求，验证 base_url + api_key + model 是否可用
@@ -343,7 +359,36 @@ class Handler(BaseHTTPRequestHandler):
         llm["api_key_set"] = bool(key)
         llm["api_key_masked"] = (key[:4] + "****" + key[-2:]) if len(key) > 8 else ("****" if key else "")
         llm.pop("api_key", None)
-        return self._send(200, {"llm": llm, "source": STATE.config["source"]})
+        mk = mureka_provider.load_mureka_config(STATE.config_path)
+        mkey = mk.get("api_key") or ""
+        return self._send(200, {
+            "llm": llm, "source": STATE.config["source"],
+            "mureka": {"enabled": bool(mk["enabled"] and mkey), "model": mk["model"],
+                       "api_key_set": bool(mkey),
+                       "api_key_masked": (mkey[:4] + "****" + mkey[-2:]) if len(mkey) > 8 else ("****" if mkey else "")},
+        })
+
+    @staticmethod
+    def _save_mureka(config_path, mureka_body):
+        """把设置弹窗提交的 mureka 节合并写回 config.local.json（脱敏值忽略）。"""
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        section = {}
+        for k in ("enabled", "api_key", "model", "vocal_gender"):
+            if k in mureka_body:
+                val = mureka_body[k]
+                if k == "api_key" and str(val).strip().endswith("*"):
+                    continue
+                section[k] = val
+        if section:
+            merged = dict(data.get("mureka") or {})
+            merged.update(section)
+            data["mureka"] = merged
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
 
     # ------------------------------------------------------------ 曲库
     def _song_route(self, method, song_id):
@@ -373,6 +418,126 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "song not found"})
         fav = bool((self._json_body() or {}).get("favorite"))
         return self._send(200, STATE.lib.set_favorite(song_id, fav))
+
+    def _persona_create(self):
+        """创建音色 Persona（同步，MuQ 嵌入提取约 1 分钟）。"""
+        body = self._json_body()
+        try:
+            meta = persona_store.create(
+                STATE.lib,
+                name=body.get("name") or "",
+                source=body.get("source") or "",
+                song_id=body.get("song_id"),
+                ref_audio_name=body.get("ref_audio"),
+                text=body.get("text"),
+            )
+        except (ValueError, RuntimeError) as e:
+            return self._send(400, {"error": str(e)})
+        return self._send(200, {"persona": meta})
+
+    def _reseg(self, song_id):
+        """分段重唱：原曲为参考，指定段落按新歌词重采样（产出新作品）。"""
+        lib = STATE.lib
+        if not lib.exists(song_id):
+            return self._send(404, {"error": "song not found"})
+        meta = lib.get_meta(song_id)
+        if not meta.get("audio_only") or meta.get("provider") != "diffrhythm":
+            return self._send(400, {"error": "仅本地神经歌声作品支持分段重唱"})
+        body = self._json_body()
+        try:
+            sec_idx = int(body.get("section_index", -1))
+        except (TypeError, ValueError):
+            return self._send(400, {"error": "section_index 非法"})
+        new_lyrics = str(body.get("new_lyrics") or "").strip()
+        if not new_lyrics:
+            return self._send(400, {"error": "新歌词不能为空"})
+        try:
+            spec = lib.get_spec(song_id)
+            score = lib.get_score(song_id)
+        except (OSError, ValueError):
+            return self._send(400, {"error": "作品缺少曲谱，无法定位段落"})
+        sections = score.get("sections") or []
+        if not (0 <= sec_idx < len(sections)):
+            return self._send(400, {"error": "段落序号越界（0-%d）" % (len(sections) - 1)})
+        sec_meta = sections[sec_idx]
+
+        bpm = score.get("bpm") or meta.get("bpm") or 100
+        spb = 60.0 / max(30, bpm)
+        sec_start = sec_meta["start_beat"] * spb
+        sec_end = min((sec_meta["start_beat"] + sec_meta["beats"]) * spb,
+                      float(meta.get("duration_sec") or 95))
+        lines = [l.strip() for l in new_lyrics.splitlines() if l.strip()]
+
+        new_spec = copy.deepcopy(spec)
+        target = new_spec["structure"][sec_idx]
+        target["lyrics"] = [lines[i % len(lines)] for i in range(target["bars"])]
+        new_spec["title"] = (spec.get("title") or "未命名") + " · 重唱版"
+        new_spec["provider"] = "diffrhythm"
+        new_spec["audio_only"] = True
+
+        audio_length = 95 if float(meta.get("duration_sec") or 95) <= 120 else 285
+        req = {
+            "provider": "diffrhythm", "edit_of": song_id, "edit_spec": new_spec,
+            "duration_sec": audio_length,
+            "edit": {"ref_song": os.path.abspath(lib.wav_path(song_id)),
+                     "segments": [[round(sec_start, 2), round(sec_end, 2)]]},
+            "seed": random.randint(1, 2 ** 30),
+        }
+        if audio_length == 285:
+            req["full_song"] = True
+        persona_id = schemas.sanitize_filename(body.get("persona_id"))
+        if persona_id:
+            req["persona_id"] = persona_id
+        job_id = STATE.jobs.submit(req)
+        return self._send(200, {"job_id": job_id,
+                                "hint": "区间外音频为 VAE 重建，音质与原曲可能有细微差别"})
+
+    def _album_create(self):
+        body = self._json_body()
+        persona_id = schemas.sanitize_filename(body.get("persona_id"))
+        if not persona_id or not persona_store.get(STATE.lib, persona_id):
+            return self._send(400, {"error": "需要有效的音色 Persona"})
+        try:
+            count = max(1, min(5, int(body.get("count") or 2)))
+        except (TypeError, ValueError):
+            count = 2
+        theme = str(body.get("theme") or "").strip()[:200] or None
+        genre = body.get("genre") if body.get("genre") in schemas.GENRES else "auto"
+        job_ids = []
+        for i in range(count):
+            job_ids.append(STATE.jobs.submit({
+                "provider": "diffrhythm",
+                "description": (theme or "一张概念专辑的第 %d 首") % (i + 1) if theme
+                else "一张概念专辑的第 %d 首，与前面曲目同一副嗓子" % (i + 1),
+                "genre": genre, "duration_sec": 95,
+                "persona_id": persona_id,
+                "seed": random.randint(1, 2 ** 30),
+            }))
+        return self._send(200, {"job_ids": job_ids, "count": count})
+
+    def _album_zip(self, query):
+        """按 ids 打包多首作品（wav+封面+歌词+meta），用于专辑下载。"""
+        import io
+        raw = (query.get("ids") or [""])[0]
+        ids = [i.strip() for i in raw.split(",") if i.strip()][:8]
+        if not ids:
+            return self._send(400, {"error": "缺少 ids"})
+        lib = STATE.lib
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for sid in ids:
+                if not lib.exists(sid):
+                    continue
+                d = lib.song_dir(sid)
+                folder = "album/" + re.sub(r'[\\/:*?"<>|]', "_",
+                                           lib.get_meta(sid).get("title", sid))
+                z.write(lib.wav_path(sid), folder + "/song.wav")
+                z.write(self._ensure_cover(sid, d), folder + "/cover.png")
+                z.writestr(folder + "/lyrics.txt", self._lyrics_text(sid))
+                z.write(os.path.join(d, "meta.json"), folder + "/meta.json")
+        fname = urllib.parse.quote("织歌-专辑.zip")
+        return self._send(200, buf.getvalue(), "application/zip",
+                          {"Content-Disposition": "attachment; filename*=UTF-8''%s" % fname})
 
     def _ref_audio_upload(self):
         """上传参考音频（神经引擎风格迁移用）：raw body，服务端生成文件名。"""

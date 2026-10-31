@@ -86,6 +86,8 @@ def parse_request(raw):
         "full_song": bool(raw.get("full_song")),
         # 写词要求（主题/故事/必须出现的词/押韵），AI 写词与作曲共同遵循
         "lyrics_req": _clip_text(raw.get("lyrics_req"), 200),
+        # 音色 Persona（服务端生成的 id）
+        "persona_id": sanitize_filename(raw.get("persona_id")),
     }
     try:
         req["key"] = theory.note_to_pc(raw["key"]) if raw.get("key") else None

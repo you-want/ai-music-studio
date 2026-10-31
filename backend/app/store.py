@@ -8,7 +8,7 @@ import uuid
 
 _FP_KEYS = ("description", "genre", "mood", "bpm", "duration_sec", "key", "mode",
             "provider", "seed", "lyrics", "lead_voice", "sing", "ref_audio",
-            "full_song", "lyrics_req")
+            "full_song", "lyrics_req", "persona_id")
 
 
 def fingerprint_of(req):

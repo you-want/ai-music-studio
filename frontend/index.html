@@ -81,6 +81,12 @@
           <span class="field-label-inline">调性</span>
           <select id="key-sel"></select>
         </div>
+        <div class="provider-row" id="persona-row">
+          <span class="field-label-inline">音色</span>
+          <select id="persona-sel"></select>
+          <button id="btn-persona-refresh" class="ghost small" title="刷新列表">↻</button>
+          <button id="btn-album" class="ghost small">📚 专辑</button>
+        </div>
         <label class="check-row" id="sing-row"><input type="checkbox" id="sing" checked> 🎤 演唱歌词（默认开启；取消则为纯器乐）</label>
         <label class="check-row"><input type="checkbox" id="dual"> 一次生成 2 个候选版本（A/B 对比）</label>
         <div class="provider-row hidden" id="ref-audio-row">
@@ -103,6 +109,7 @@
           <option value="mock">离线 Mock</option>
           <option value="llm">大模型 LLM</option>
           <option value="diffrhythm" id="opt-diffrhythm">🧠 神经歌声（真人演唱）</option>
+          <option value="mureka" id="opt-mureka">☁ Mureka（云 · 约 $0.05/首）</option>
         </select>
         <span id="llm-badge" class="badge">LLM 未配置</span>
       </div>
@@ -145,6 +152,7 @@
           <button id="btn-remix" class="ghost small">🔁 再来一版</button>
           <button id="btn-extend" class="ghost small">⏱ 延长 30s</button>
           <button id="btn-regen" class="ghost small">🎼 换副歌</button>
+          <button id="btn-reseg" class="ghost small">🎤 重唱片段</button>
         </div>
         <div class="action-group">
           <span class="ag-label">下载</span>
@@ -165,6 +173,7 @@
           <span class="ag-label">管理</span>
           <button id="btn-fav" class="ghost small">☆ 收藏</button>
           <button id="btn-rename" class="ghost small">✏️ 改名</button>
+          <button id="btn-persona-extract" class="ghost small">🎨 提取音色</button>
         </div>
       </div>
 
@@ -207,6 +216,15 @@
         <div class="small-text muted">真声演唱完整歌曲（95 秒/首，CPU 渲染约 15-30 分钟）。
           未安装时运行：<code>bash scripts/setup_neural.sh</code></div>
       </div>
+      <div class="neural-box" id="cfg-mureka">
+        <b>☁ Mureka 云 API（约 $0.05/首，含商用授权）</b>
+        <label class="check-row"><input type="checkbox" id="cfg-mureka-enabled"> 启用 Mureka 云引擎</label>
+        <label class="field-label">模型</label>
+        <input id="cfg-mureka-model" type="text" placeholder="mureka-6">
+        <label class="field-label">API Key（platform.mureka.ai 获取）</label>
+        <input id="cfg-mureka-key" type="password" placeholder="粘贴 API Key（留空保持不变）">
+        <div id="cfg-mureka-status" class="small-text"></div>
+      </div>
       <div class="modal-actions">
         <button id="cfg-test" class="ghost">🔌 测试连接</button>
         <button id="cfg-cancel" class="ghost">取消</button>
@@ -214,6 +232,23 @@
       </div>
       <div id="cfg-test-result" class="cfg-test-result hidden"></div>
       <div id="cfg-status" class="muted small-text"></div>
+    </div>
+  </div>
+
+  <!-- ===================== 重唱片段弹层 ===================== -->
+  <div id="reseg-modal" class="modal hidden">
+    <div class="modal-card card">
+      <h3>🎤 重唱片段</h3>
+      <p class="muted">选择一个段落并改写歌词：区间外保持原曲，区间内按新歌词重新演唱（产出新作品，不覆盖原曲）。</p>
+      <label class="field-label" for="reseg-section">段落</label>
+      <select id="reseg-section"></select>
+      <label class="field-label" for="reseg-lyrics">该段落的新歌词（每行一句）</label>
+      <textarea id="reseg-lyrics" rows="5"
+        placeholder="新副歌第一句…&#10;新副歌第二句…"></textarea>
+      <div class="modal-actions">
+        <button id="reseg-cancel" class="ghost">取消</button>
+        <button id="reseg-submit" class="primary">开始重唱</button>
+      </div>
     </div>
   </div>
 

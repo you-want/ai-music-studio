@@ -18,11 +18,13 @@ torch CPU）里进行，本模块只负责编排：探测可用性、拼装任�
 """
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from .audio_base import AudioProvider, AudioProviderError, CancelledError
 
@@ -32,6 +34,7 @@ DIFFRHYTHM_DIR = os.path.join(_ROOT, "DiffRhythm")
 RUNNER = os.path.join(_ROOT, "backend", "neural", "diffrhythm_runner.py")
 ALIGN_RUNNER = os.path.join(_ROOT, "backend", "neural", "align_runner.py")
 DEMUCS_RUNNER = os.path.join(_ROOT, "backend", "neural", "demucs_runner.py")
+PERSONA_RUNNER = os.path.join(_ROOT, "backend", "neural", "persona_runner.py")
 FULL_CFM = os.path.join(DIFFRHYTHM_DIR, "pretrained", "cfm_model_full.pt")
 
 # 风格英文关键词（MuQ-MuLan 文本编码器，参考官方示例 prompt 形态）
@@ -251,67 +254,179 @@ class DiffRhythmProvider(AudioProvider):
         if not job["lyric_lines"]:
             raise AudioProviderError("没有可演唱的歌词（神经引擎需要歌词）")
         job_path = os.path.join(os.path.dirname(os.path.abspath(out_wav)), "neural_job.json")
+        job["_job_path"] = job_path
+
+        job["id"] = uuid.uuid4().hex[:12]
+        if req.get("style_prompt_npy"):
+            job["style_prompt_npy"] = os.path.abspath(req["style_prompt_npy"])
+        edit = req.get("edit")
+        if edit:
+            ref = os.path.abspath(edit.get("ref_song") or "")
+            dur = _wav_duration(ref)
+            if dur < audio_length - 1.0:
+                raise AudioProviderError(
+                    "原曲时长 %.0fs 不足以做 %.0fs 的分段重唱" % (dur, audio_length))
+            job["edit"] = {"ref_song": ref,
+                           "segments": edit.get("segments") or [[0, audio_length]]}
         with open(job_path, "w", encoding="utf-8") as f:
             json.dump(job, f, ensure_ascii=False)
 
+        # 常驻 worker：模型只加载一次，超时/取消杀掉 worker（下次任务自动重启重载）
+        timeout_min = cfg["timeout_min"] * (1 if audio_length == 95 else 3)
+        done = _WORKER.run_job(job, timeout_min, progress_cb, cancel_event)
+        if not os.path.isfile(out_wav):
+            raise AudioProviderError("DiffRhythm 未产出音频文件")
+        return done
+
+
+def _wav_duration(path):
+    import wave
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 1)
+    except Exception:
+        return 0.0
+
+
+class NeuralWorker:
+    """常驻 diffrhythm_runner --serve 的管理器：懒启动、单飞、死亡自动重启。
+
+    协议：stdin 发 job.json 路径行；stdout JSON 行（ready/done/error/progress，
+    done/error 带 id）。超时或取消时杀掉 worker 进程（代价=下次任务重载模型 1-2 分钟）。
+    """
+
+    def __init__(self):
+        self._proc = None
+        self._log_fh = None
+        self._lock = threading.Lock()
+
+    def _log_path(self):
+        return os.path.join(DIFFRHYTHM_DIR, ".worker.log")
+
+    def _spawn(self):
+        cfg = load_neural_config()
+        py = cfg.get("python") or default_python()
+        if not os.path.isfile(py):
+            raise AudioProviderError("神经引擎 venv 不存在——先运行 scripts/setup_neural.sh")
         env = dict(os.environ)
         env.setdefault("HF_HOME", os.path.join(DIFFRHYTHM_DIR, "pretrained", "hf"))
         env.setdefault("OMP_NUM_THREADS", str(min(8, os.cpu_count() or 4)))
         if cfg.get("device"):
             env["DIFFRHYTHM_DEVICE"] = str(cfg["device"])
-        env.pop("PYTHONPATH", None)  # 隔离：不把主应用包带进 venv
+        env.pop("PYTHONPATH", None)
         env["PYTHONUNBUFFERED"] = "1"
+        if self._log_fh:
+            try:
+                self._log_fh.close()
+            except OSError:
+                pass
+        self._log_fh = open(self._log_path(), "ab")
         proc = subprocess.Popen(
-            [py, RUNNER, job_path], cwd=DIFFRHYTHM_DIR, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            encoding="utf-8", errors="replace")
+            [py, RUNNER, "--serve"], cwd=DIFFRHYTHM_DIR, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log_fh,
+            text=True, encoding="utf-8", errors="replace")
+        self._proc = proc
+        # 等待 ready（首次含模型加载 1-2 分钟）
+        deadline = time.time() + 420
+        for line in proc.stdout:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("type") == "ready":
+                return
+            if msg.get("type") == "error":
+                self._proc = None
+                raise AudioProviderError("神经 worker 启动失败: %s" % msg.get("error"))
+            if time.time() > deadline:
+                break
+        if proc.poll() is None:
+            proc.kill()
+        self._proc = None
+        raise AudioProviderError("神经 worker 启动超时（详情见 %s）" % self._log_path())
 
-        # 285s 版计算量约 3 倍，超时同步放宽
-        deadline = time.time() + cfg["timeout_min"] * 60 * (1 if audio_length == 95 else 3)
-        stop = threading.Event()
+    def _ensure(self):
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        self._spawn()
 
-        def watchdog():  # 超时 / 取消 -> 杀进程
-            while not stop.wait(timeout=1.0):
-                if cancel_event is not None and cancel_event.is_set():
-                    proc.kill()
-                    return
-                if time.time() > deadline:
-                    proc.kill()
-                    return
-        threading.Thread(target=watchdog, daemon=True).start()
+    def _kill(self):
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+        self._proc = None
 
-        error = None
-        try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line.startswith("{"):
-                    continue  # 模型库打印混入 stdout 的非 JSON 行
+    def run_job(self, job, timeout_min, progress_cb=None, cancel_event=None):
+        progress_cb = progress_cb or (lambda frac, note: None)
+        with self._lock:
+            self._ensure()
+            proc = self._proc
+            jid = str(job.get("id") or uuid.uuid4().hex[:12])
+            path = job.get("_job_path")
+            if not path:
+                raise AudioProviderError("worker 任务缺少 _job_path")
+            try:
+                proc.stdin.write(path.strip() + "\n")
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                self._kill()
+                raise AudioProviderError("神经 worker 管道已断开，请重试（将自动重启）")
+
+            q = queue.Queue()
+
+            def _pump():
                 try:
-                    msg = json.loads(line)
+                    for line in proc.stdout:
+                        q.put(line)
+                    q.put(None)  # EOF
+                except (OSError, ValueError):
+                    q.put(None)
+            threading.Thread(target=_pump, daemon=True).start()
+
+            deadline = time.time() + timeout_min * 60
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    self._kill()
+                    raise CancelledError("已取消")
+                if time.time() > deadline:
+                    self._kill()
+                    raise AudioProviderError("渲染超时（%d 分钟），worker 已重启" % timeout_min)
+                try:
+                    raw = q.get(timeout=0.5)
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        self._proc = None
+                        raise AudioProviderError(
+                            "神经 worker 意外退出（详情见 %s）" % self._log_path())
+                    continue
+                if raw is None:
+                    self._proc = None
+                    raise AudioProviderError(
+                        "神经 worker 管道关闭（详情见 %s）" % self._log_path())
+                raw = raw.strip()
+                if not raw.startswith("{"):
+                    continue
+                try:
+                    msg = json.loads(raw)
                 except ValueError:
                     continue
-                if msg.get("type") == "progress":
+                mtype = msg.get("type")
+                if mtype == "progress":
                     progress_cb(0.06 + 0.88 * float(msg.get("frac") or 0),
                                 str(msg.get("note") or ""))
-                elif msg.get("type") == "done":
-                    break
-                elif msg.get("type") == "error":
-                    error = str(msg.get("error") or "未知错误")
-            code = proc.wait()
-        finally:
-            stop.set()
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+                elif mtype == "done":
+                    return msg
+                elif mtype == "error":
+                    raise AudioProviderError("DiffRhythm 渲染失败: %s" % msg.get("error"))
 
-        if cancel_event is not None and cancel_event.is_set():
-            raise CancelledError("已取消")
-        if error:
-            raise AudioProviderError("DiffRhythm 渲染失败: %s" % error)
-        if code != 0:
-            raise AudioProviderError("DiffRhythm 进程异常退出（code=%d）" % code)
-        if not os.path.isfile(out_wav):
-            raise AudioProviderError("DiffRhythm 未产出音频文件")
+
+# 模块级单例：全进程共用一个常驻 worker（模型 ~10GB 只加载一次）
+_WORKER = NeuralWorker()
 
 # ------------------------------------------------------------ 后处理（模块级，jobs 直接调用）
 def _run_subprocess_job(script, job, timeout_min, config_path=None, progress_cb=None,

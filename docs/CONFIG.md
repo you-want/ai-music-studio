@@ -193,6 +193,23 @@ DiffRhythm/.venv-neural/bin/python backend/neural/selftest.py --mini   # 自检�
 
 `jobs._run_audio`、进度、取消、曲库展示全部自动复用，预计 1-2 小时工作量。
 
+### 音色 Persona / 分段重唱 / 专辑（v5）
+
+- **音色 Persona**：播放器「🎨 提取音色」把当前作品的嗓音存为可复用音色
+  （存于 `backend/output/personas/`）；进阶模式「音色」下拉选它再生成——
+  同一副嗓子反复出歌，适合做专辑；
+- **分段重唱**：播放器「🎤 重唱片段」选段落改歌词，区间外保持原曲，
+  产出为新作品（未编辑段为 VAE 重建，音质可能有细微差别）；
+- **专辑**：进阶模式 Persona 行「📚 专辑」——同一音色连出 1-5 首（串行渲染），
+  完成后可下载分享包；多首打包正在路上。
+
+### Mureka 云 API（v5）
+
+设置 → 云 API：勾选启用并填入 [platform.mureka.ai](https://platform.mureka.ai) 的 API Key
+（约 $0.05/首，含商用授权）。引擎选「☁ Mureka」即可云端生成（1-2 分钟/首），
+产物照常做歌词对齐与分轨。也可 `config.local.json` 写
+`"mureka": {"enabled": true, "api_key": "..."}` 或环境变量 `AI_MUSIC_MUREKA_KEY`。
+
 ### 参考音频风格迁移（v4）
 
 进阶模式选神经歌声后可上传 **≥10 秒** wav/mp3/flac（`POST /api/ref-audio`），

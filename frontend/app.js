@@ -30,6 +30,7 @@ const state = {
   pollTimer: null,
   lastParams: null,   // 上次生成的参数（供 再来一版/延长 使用）
   engines: {},        // 引擎可用性（/api/meta.engines）
+  personas: [],       // 音色 Persona 列表
   refAudio: null,     // 已上传参考音频文件名（神经引擎风格迁移）
   activeJobIds: [],   // 进行中的任务（供取消）
   jobStartedAt: 0,
@@ -39,6 +40,7 @@ const state = {
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   await loadMeta();
+  await loadPersonas();
   await refreshConfigBadge();
   await refreshLibrary();
 });
@@ -62,6 +64,16 @@ async function loadMeta() {
   // 神经歌声引擎可用性：不可用时禁用选项并提示安装方法
   state.engines = (state.meta && state.meta.engines) || {};
   const neural = state.engines.diffrhythm || {};
+  const mopt = $("opt-mureka");
+  if (mopt) {
+    const mk = state.engines.mureka || {};
+    if (mk.available === false) {
+      mopt.disabled = true;
+      mopt.title = mk.reason || "在设置里配置 Mureka API Key";
+    } else if (mk.available === true) {
+      mopt.title = mk.reason || "";
+    }
+  }
   const opt = $("opt-diffrhythm");
   if (opt) {
     if (neural.available === false) {
@@ -136,6 +148,8 @@ function collectParams() {
   if (p.provider === "diffrhythm") {
     if (state.refAudio) p.ref_audio = state.refAudio;
     if ($("full-song") && $("full-song").checked) p.full_song = true;
+    const pid = $("persona-sel") ? $("persona-sel").value : "";
+    if (pid && pid !== "none") p.persona_id = pid;
   }
   return p;
 }
@@ -855,6 +869,149 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+/* ================= v5：音色 Persona / 重唱片段 / 专辑 ================= */
+async function loadPersonas() {
+  if (!$("persona-sel")) return;
+  try {
+    const data = await (await api("/api/personas")).json();
+    state.personas = data.personas || [];
+  } catch (e) { state.personas = []; }
+  const sel = $("persona-sel");
+  const cur = sel.value;
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "none";
+  none.textContent = "不指定（每次新音色）";
+  sel.appendChild(none);
+  state.personas.forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = "🎨 " + p.name;
+    sel.appendChild(o);
+  });
+  sel.value = cur && state.personas.some((p) => p.id === cur) ? cur : "none";
+}
+
+async function extractPersona() {
+  const id = state.currentSongId;
+  if (!id) return;
+  const name = prompt("给这个音色起个名字（例如：夜班嗓）：", $("song-title").textContent || "");
+  if (name === null) return;
+  const btn = $("btn-persona-extract");
+  btn.disabled = true;
+  btn.textContent = "🎨 提取中约 1 分钟…";
+  try {
+    const resp = await api("/api/personas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "song", song_id: id, name: (name || "").trim() || "我的音色" }),
+    });
+    const d = await resp.json();
+    if (d.persona) {
+      await loadPersonas();
+      $("persona-sel").value = d.persona.id;
+      $("persona-row").scrollIntoView({ behavior: "smooth", block: "center" });
+      showJob(true, "✅ 音色「" + d.persona.name + "」已提取，可在引擎配置里选用", 100);
+      setTimeout(() => showJob(false), 3200);
+    } else {
+      alert(d.error || "提取失败");
+    }
+  } catch (e) {
+    alert("提取失败：" + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = "🎨 提取音色";
+}
+
+function openReseg() {
+  const score = state.score;
+  if (!score || !score.sections || !score.sections.length) {
+    alert("当前作品没有段落信息");
+    return;
+  }
+  const sel = $("reseg-section");
+  sel.innerHTML = "";
+  score.sections.forEach((sec, i) => {
+    const first = (sec.lyrics || []).find((t) => t && t.trim()) || "（无歌词）";
+    const o = document.createElement("option");
+    o.value = i;
+    o.textContent = (sec.label || sec.name) + " · " + sec.bars + " 小节 · " + String(first).slice(0, 10);
+    o.selected = sec.name === "chorus";
+    sel.appendChild(o);
+  });
+  $("reseg-lyrics").value = "";
+  $("reseg-modal").classList.remove("hidden");
+}
+
+async function submitReseg() {
+  const id = state.currentSongId;
+  if (!id) return;
+  const secIdx = parseInt($("reseg-section").value, 10);
+  const lyrics = $("reseg-lyrics").value.trim();
+  if (!lyrics) { alert("新歌词不能为空"); return; }
+  const btn = $("reseg-submit");
+  btn.disabled = true;
+  btn.textContent = "提交中…";
+  try {
+    const resp = await api("/api/songs/" + id + "/reseg", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ section_index: secIdx, new_lyrics: lyrics }),
+    });
+    const d = await resp.json();
+    if (d.job_id) {
+      $("reseg-modal").classList.add("hidden");
+      $("btn-generate").disabled = true;
+      showJob(true, "提交重唱任务…", 0);
+      state.jobStartedAt = Date.now();
+      state.activeJobIds = [d.job_id];
+      $("btn-job-cancel").classList.remove("hidden");
+      pollJobs([d.job_id]);
+    } else {
+      alert(d.error || "提交失败");
+    }
+  } catch (e) {
+    alert("提交失败：" + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = "开始重唱";
+}
+
+async function createAlbum() {
+  const pid = $("persona-sel") ? $("persona-sel").value : "";
+  if (!pid || pid === "none") { alert("请先选择一个音色 Persona"); return; }
+  const pname = (state.personas.find((p) => p.id === pid) || {}).name || "";
+  const theme = prompt("专辑主题（一句描述，会写给每首歌的歌词）：", pname);
+  if (theme === null) return;
+  const n = parseInt(prompt("生成几首？（1-5）", "2"), 10);
+  if (!n || n < 1) return;
+  const btn = $("btn-album");
+  btn.disabled = true;
+  btn.textContent = "📚 排队中…";
+  try {
+    const resp = await api("/api/album", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ persona_id: pid, count: n, theme: theme.trim() }),
+    });
+    const d = await resp.json();
+    if (d.job_ids && d.job_ids.length) {
+      $("btn-generate").disabled = true;
+      showJob(true, "📚 专辑 " + d.count + " 首已排队（同一副嗓子）…", 0);
+      state.jobStartedAt = Date.now();
+      state.activeJobIds = d.job_ids;
+      $("btn-job-cancel").classList.remove("hidden");
+      pollJobs(d.job_ids);
+    } else {
+      alert(d.error || "排队失败");
+    }
+  } catch (e) {
+    alert("排队失败：" + e.message);
+  }
+  btn.disabled = false;
+  btn.textContent = "📚 专辑";
+}
+
 /* ================= 设置 ================= */
 async function openSettings() {
   const cfg = await (await api("/api/config")).json();
@@ -870,6 +1027,16 @@ async function openSettings() {
   $("cfg-neural-status").textContent = neural.available
     ? "✅ " + (neural.reason || "就绪") + " · 采样步数 " + neural.steps
     : "❌ " + (neural.reason || "未安装（bash scripts/setup_neural.sh）");
+  try {
+    const cfg = await (await api("/api/config")).json();
+    const mk = cfg.mureka || {};
+    $("cfg-mureka-enabled").checked = !!mk.enabled;
+    $("cfg-mureka-model").value = mk.model || "mureka-6";
+    $("cfg-mureka-key").value = "";
+    $("cfg-mureka-key").placeholder = mk.api_key_set
+      ? ("已保存: " + mk.api_key_masked) : "粘贴 API Key";
+    $("cfg-mureka-status").textContent = "";
+  } catch (e) { /* 忽略 */ }
   $("settings-modal").classList.remove("hidden");
 }
 
@@ -922,14 +1089,23 @@ async function saveSettings() {
   };
   const key = $("cfg-key").value.trim();
   if (key) body.llm.api_key = key;
+  body.mureka = {
+    enabled: $("cfg-mureka-enabled").checked,
+    model: $("cfg-mureka-model").value.trim() || "mureka-6",
+  };
+  const mkey = $("cfg-mureka-key").value.trim();
+  if (mkey) body.mureka.api_key = mkey;
   const resp = await api("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   const cfg = await resp.json();
+  const mkOk = cfg.mureka && cfg.mureka.enabled;
+  $("cfg-mureka-status").textContent = mkOk ? "✅ Mureka 云引擎已启用" : "Mureka 未启用";
   $("cfg-status").textContent = "✅ 已保存（来源: " + cfg.source + "）";
   await refreshConfigBadge();
+  await loadMeta();
   setTimeout(() => $("settings-modal").classList.add("hidden"), 900);
 }
 
@@ -1040,6 +1216,15 @@ function bindEvents() {
   $("cfg-save").onclick = saveSettings;
   $("cfg-test").onclick = testConfig;
   $("btn-job-cancel").onclick = cancelJob;
+  $("btn-persona-extract").onclick = extractPersona;
+  $("btn-persona-refresh").onclick = loadPersonas;
+  $("btn-reseg").onclick = openReseg;
+  $("reseg-cancel").onclick = () => $("reseg-modal").classList.add("hidden");
+  $("reseg-submit").onclick = submitReseg;
+  $("btn-album").onclick = createAlbum;
+  $("reseg-modal").onclick = (e) => {
+    if (e.target.id === "reseg-modal") $("reseg-modal").classList.add("hidden");
+  };
   $("provider").onchange = onProviderChange;
   $("btn-ref-upload").onclick = uploadRefAudio;
   onProviderChange();

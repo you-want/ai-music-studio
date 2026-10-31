@@ -249,3 +249,16 @@ _req (provider=diffrhythm)
 | 出站安全 | LLM TLS 默认严格校验（certifi），显式 `AI_MUSIC_INSECURE_SSL=1` 才降级 |
 | 并发 | `POST /api/config` 加锁；响应统一 `nosniff` |
 | 测试 | 配置隔离修复（显式 config path 不回落项目根），测试不再触碰开发者真实 LLM 配置 |
+
+
+## 12. v5 增补（本地极致 + 云 API）
+
+| 能力 | 实现 |
+|---|---|
+| 常驻神经 worker | `diffrhythm_runner.py --serve`：模型常驻（~10GB），stdin 任务协议，空闲 30min/50 任务自杀；`NeuralWorkerHandle` 懒启动/崩溃自动重启/超时取消即杀（代价=下次重载）；连续生成每首省 1-2 分钟 |
+| 音色 Persona | MuQ-MuLan 嵌入（L2 归一 [1,512]）缓存为 .npy：从作品人声分轨 / 参考音频 / 文本描述三种来源提取（`persona_runner.py` 只加载 MuQ）；生成任务 `style_prompt_npy` 直接替换文本风格向量 |
+| 分段重唱 | DiffRhythm edit 模式：参考曲编码为 latent（`vae_sample` 消耗 RNG → 任务开头先播种），`fixed_span_mask` 圈区间，`step_cond=where(mask,0,cond)` + 采样后 `where(mask,sampled,cond)` 缝合；整首 LRC 只改目标段文本；产出为新作品（不覆盖原曲）；未编辑段为 VAE 重建（音质细微差异，已文档化） |
+| 专辑 | `POST /api/album`：同一 Persona 顺序排队 N 首（神经槽=1 串行）；`GET /api/album.zip?ids=` 打包 WAV+封面+歌词册 |
+| Mureka 云 API | `providers/mureka.py` 实现 AudioProvider：generate 提交→轮询 query→MP3 下载→ffmpeg 转 WAV，之后复用本地对齐+分轨；`/v1/files/upload` 参考音频→reference_id；响应字段容错解析 |
+| 配置 | `mureka` 节（enabled/api_key/model/vocal_gender）+ env `AI_MUSIC_MUREKA_KEY`；设置弹窗云 API 区（key 脱敏） |
+
