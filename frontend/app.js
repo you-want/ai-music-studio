@@ -956,7 +956,8 @@ async function submitReseg() {
     const resp = await api("/api/songs/" + id + "/reseg", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ section_index: secIdx, new_lyrics: lyrics }),
+      body: JSON.stringify({ section_index: secIdx, new_lyrics: lyrics,
+                             full_remake: !!$("reseg-full").checked }),
     });
     const d = await resp.json();
     if (d.job_id) {
@@ -1035,6 +1036,8 @@ async function openSettings() {
     $("cfg-mureka-key").value = "";
     $("cfg-mureka-key").placeholder = mk.api_key_set
       ? ("已保存: " + mk.api_key_masked) : "粘贴 API Key";
+    $("cfg-steps").value = (cfg.neural && cfg.neural.steps) || 16;
+    $("cfg-steps-val").textContent = $("cfg-steps").value;
     $("cfg-mureka-status").textContent = "";
   } catch (e) { /* 忽略 */ }
   $("settings-modal").classList.remove("hidden");
@@ -1089,6 +1092,7 @@ async function saveSettings() {
   };
   const key = $("cfg-key").value.trim();
   if (key) body.llm.api_key = key;
+  body.neural = { steps: parseInt($("cfg-steps").value, 10) || 16 };
   body.mureka = {
     enabled: $("cfg-mureka-enabled").checked,
     model: $("cfg-mureka-model").value.trim() || "mureka-6",
@@ -1211,6 +1215,7 @@ function bindEvents() {
     drawSpectrum();
   });
 
+  $("cfg-steps").oninput = (e) => { $("cfg-steps-val").textContent = e.target.value; };
   $("btn-settings").onclick = openSettings;
   $("cfg-cancel").onclick = () => $("settings-modal").classList.add("hidden");
   $("cfg-save").onclick = saveSettings;

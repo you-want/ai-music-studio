@@ -119,16 +119,22 @@ class JobManager:
                 return
 
             job.update(status="running", stage="composing", stage_note=STAGES_ZH["composing"])
+            prebuilt = req.pop("fixed_spec", None)  # 整首重制：服务端已构建完整 spec（跳过作曲）
             if req.get("provider") in AUDIO_PROVIDERS:
                 # 音频类引擎固定产出 95s（或全曲 285s）：作曲按此时长铺排歌词结构
                 req["duration_sec"] = neural_resolve_length(req)
-            spec, info = self._compose(req)
+            if prebuilt:
+                spec, info = prebuilt, {"provider": "prebuilt"}
+            else:
+                spec, info = self._compose(req)
             if spec is None:
                 raise RuntimeError("作曲失败: %s" % (info or {}).get("reason", "未知"))
             if req.get("lyrics"):
                 spec = schemas.apply_lyrics(spec, req["lyrics"])  # 进阶模式自定义歌词
 
             if req.get("provider") in AUDIO_PROVIDERS:
+                if (info or {}).get("provider", "").startswith("mock"):
+                    job.update(stage_note="⚠️ LLM 超时，歌词为模板兜底（重试可得更好歌词）")
                 self._run_audio(job, req, spec, info, fp, ev)
                 return
 

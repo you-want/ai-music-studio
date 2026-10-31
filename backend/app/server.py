@@ -248,6 +248,8 @@ class Handler(BaseHTTPRequestHandler):
                     STATE.config = llm_provider.save_config(STATE.config_path, llm_now)
                     if body.get("mureka"):
                         self._save_mureka(STATE.config_path, body["mureka"])
+                    if body.get("neural"):
+                        self._save_neural(STATE.config_path, body["neural"])
                 return self._api_config_get()
             if path == "/api/config/test" and method == "POST":
                 # 测试 LLM 连接：发一条最小 chat 请求，验证 base_url + api_key + model 是否可用
@@ -361,12 +363,32 @@ class Handler(BaseHTTPRequestHandler):
         llm.pop("api_key", None)
         mk = mureka_provider.load_mureka_config(STATE.config_path)
         mkey = mk.get("api_key") or ""
+        nd = diffrhythm_provider.load_neural_config(STATE.config_path)
         return self._send(200, {
             "llm": llm, "source": STATE.config["source"],
             "mureka": {"enabled": bool(mk["enabled"] and mkey), "model": mk["model"],
                        "api_key_set": bool(mkey),
                        "api_key_masked": (mkey[:4] + "****" + mkey[-2:]) if len(mkey) > 8 else ("****" if mkey else "")},
+            "neural": {"steps": nd["steps"]},
         })
+
+    @staticmethod
+    def _save_neural(config_path, neural_body):
+        """设置弹窗提交的 neural 节（采样步数）合并写回 config.local.json。"""
+        try:
+            steps = max(8, min(32, int(neural_body.get("steps") or 16)))
+        except (TypeError, ValueError):
+            return
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        merged = dict(data.get("neural") or {})
+        merged["steps"] = steps
+        data["neural"] = merged
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     @staticmethod
     def _save_mureka(config_path, mureka_body):
@@ -479,8 +501,6 @@ class Handler(BaseHTTPRequestHandler):
         req = {
             "provider": "diffrhythm", "edit_of": song_id, "edit_spec": new_spec,
             "duration_sec": audio_length,
-            "edit": {"ref_song": os.path.abspath(lib.wav_path(song_id)),
-                     "segments": [[round(sec_start, 2), round(sec_end, 2)]]},
             "seed": random.randint(1, 2 ** 30),
         }
         if audio_length == 285:
@@ -488,9 +508,14 @@ class Handler(BaseHTTPRequestHandler):
         persona_id = schemas.sanitize_filename(body.get("persona_id"))
         if persona_id:
             req["persona_id"] = persona_id
+        if body.get("full_remake"):
+            # 整首重制：不用 edit 模式（无 VAE 往返损失），全程重新演唱——质量最佳
+            req["fixed_spec"] = new_spec
+        else:
+            req["edit"] = {"ref_song": os.path.abspath(lib.wav_path(song_id)),
+                           "segments": [[round(sec_start, 2), round(sec_end, 2)]]}
         job_id = STATE.jobs.submit(req)
-        return self._send(200, {"job_id": job_id,
-                                "hint": "区间外音频为 VAE 重建，音质与原曲可能有细微差别"})
+        return self._send(200, {"job_id": job_id})
 
     def _album_create(self):
         body = self._json_body()

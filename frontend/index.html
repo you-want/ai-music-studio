@@ -216,6 +216,15 @@
         <div class="small-text muted">真声演唱完整歌曲（95 秒/首，CPU 渲染约 15-30 分钟）。
           未安装时运行：<code>bash scripts/setup_neural.sh</code></div>
       </div>
+      <div class="neural-box" id="cfg-neural-quality">
+        <b>🎚 采样质量（步数越大越慢越细腻）</b>
+        <label class="sliders" style="margin-top:8px">
+          <label>步数 <b id="cfg-steps-val">16</b>
+            <input type="range" id="cfg-steps" min="8" max="32" step="4" value="16">
+          </label>
+        </label>
+        <div class="small-text muted">16=标准（约 15-30 分钟/首）· 32=高质量（约 2 倍耗时，模型作者推荐值）</div>
+      </div>
       <div class="neural-box" id="cfg-mureka">
         <b>☁ Mureka 云 API（约 $0.05/首，含商用授权）</b>
         <label class="check-row"><input type="checkbox" id="cfg-mureka-enabled"> 启用 Mureka 云引擎</label>
@@ -245,6 +254,7 @@
       <label class="field-label" for="reseg-lyrics">该段落的新歌词（每行一句）</label>
       <textarea id="reseg-lyrics" rows="5"
         placeholder="新副歌第一句…&#10;新副歌第二句…"></textarea>
+      <label class="check-row"><input type="checkbox" id="reseg-full"> 🎚 整首重制（质量最佳：无 VAE 重建损失，全程重新演唱，约 2 倍耗时）</label>
       <div class="modal-actions">
         <button id="reseg-cancel" class="ghost">取消</button>
         <button id="reseg-submit" class="primary">开始重唱</button>

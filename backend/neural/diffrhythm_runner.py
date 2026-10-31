@@ -146,13 +146,23 @@ def run_job(job, ctx, prog):
     log("id=%s lyrics=%d end_frame=%d" % (jid, len(lyric_lines), end_frame))
     prog(0.14, "歌词编码完成")
 
-    # ---- 风格 prompt（persona 嵌入 > 参考音频 > 文本） ----
+    # ---- 风格 prompt（persona 嵌入 + 文本风格融合 > persona 单独 > 参考音频 > 文本） ----
     if job.get("style_prompt_npy"):
         import numpy as np
-        prog(0.15, "应用音色 Persona…")
-        emb = np.load(job["style_prompt_npy"]).astype("float32")
-        style_prompt = torch.from_numpy(emb).to(device)
-        log("persona embedding loaded: %s" % str(emb.shape))
+        prog(0.15, "加载音色 Persona…")
+        import torch.nn.functional as F
+        persona = torch.from_numpy(
+            np.load(job["style_prompt_npy"]).astype("float32")).to(device)
+        if job.get("style_prompt"):
+            # 融合：人声身份（persona）+ 曲风语境（文本）各半，再归一化
+            # —— 只用人声嵌入会丢失编曲/器乐风格，生成质量显著下降
+            text_emb = get_style_prompt(muq, prompt=job["style_prompt"]).float()
+            blended = F.normalize(persona + text_emb.to(device), dim=-1)
+            style_prompt = blended
+            log("style = persona + text blended")
+        else:
+            style_prompt = persona
+            log("style = persona only")
     elif job.get("ref_audio"):
         prog(0.15, "分析参考音频风格…")
         style_prompt = get_style_prompt(muq, wav_path=job["ref_audio"])
