@@ -68,7 +68,7 @@ def full_weights_ready():
 
 def load_neural_config(config_path=None):
     """读 neural 配置节：环境变量 > config.local.json > 默认值。"""
-    cfg = {"enabled": True, "steps": 16, "timeout_min": 90, "python": None,
+    cfg = {"enabled": True, "steps": 16, "timeout_min": 150, "python": None,
            "device": None, "audio_length": 95, "whisper_model": "small",
            "align": True, "separate": True}
     path = config_path or os.environ.get("AI_MUSIC_CONFIG") or os.path.join(_ROOT, "config.local.json")
@@ -93,7 +93,7 @@ def load_neural_config(config_path=None):
             except ValueError:
                 pass
     cfg["steps"] = max(2, min(64, int(cfg["steps"] or 16)))
-    cfg["timeout_min"] = max(1, int(cfg["timeout_min"] or 90))
+    cfg["timeout_min"] = max(1, int(cfg["timeout_min"] or 150))
     length = int(cfg["audio_length"] or 95)
     cfg["audio_length"] = length if length == 95 else min(285, max(96, length))
     return cfg

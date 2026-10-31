@@ -310,10 +310,31 @@ class JobManager:
             return spec, info
         info = {}
         if llm_cfg.get("enabled"):
-            spec, info = llm_provider.provide(req, cfg)
+            if mode in AUDIO_PROVIDERS:
+                # 音频流程有整体时间预算：LLM 挂起（慢滴响应绕过 socket 超时）
+                # 会拖死整个任务 —— 3 分钟硬预算，超时回落 Mock
+                spec, info = self._llm_with_budget(req, cfg, budget_sec=180)
+            else:
+                spec, info = llm_provider.provide(req, cfg)
             if spec is not None:
                 return spec, info
             info = {"provider": "mock(回落)", "reason": info.get("reason", "LLM 失败")}
         spec = mock_composer.compose(req)
         spec["provider"] = "mock"
         return spec, info
+
+    def _llm_with_budget(self, req, cfg, budget_sec=180):
+        """带硬预算的 LLM 作曲：后台线程执行，超时放弃（线程自行消亡）回落。"""
+        box = {}
+
+        def worker():
+            try:
+                box["result"] = llm_provider.provide(req, cfg)
+            except Exception as e:  # noqa: BLE001
+                box["result"] = (None, {"reason": str(e)})
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(budget_sec)
+        if "result" not in box:
+            return None, {"reason": "LLM 作曲超过 %d 秒未返回" % budget_sec}
+        return box["result"]
