@@ -226,6 +226,17 @@ _req (provider=diffrhythm)
 | 取消 | `DELETE /api/jobs/{id}` → `cancel_event` → watchdog kill 子进程 → 任务置 canceled；各阶段边界都有检查点 |
 | 前端降级 | `score.audio_only` → 钢琴卷帘画"段落+歌词时间轴"，隐藏 MIDI/分轨/换副歌/延长；卡拉OK、封面、MV、bundle 正常 |
 
+### 11.3 v4.1 后处理链 + 写词要求
+
+| 能力 | 实现 |
+|---|---|
+| 歌词强制对齐 | 生成后 faster-whisper 转写（int8 CPU，词级时间戳）→ `align_runner.py` 内 Needleman-Wunsch 单调字符对齐（时间带约束防漂移）→ 每句歌词真实起止时间写入 `score.lyric_events`，置信度 <0.35 的行回落小节估算；前端卡拉OK按播放秒数跟唱 |
+| Demucs 源分离 | `demucs_runner.py`（htdemucs）→ vocals/drums/bass/other 映射为 stem_vocal/drums/bass/harmony（神经作品的"和声"轨即伴奏）；失败不影响成品 |
+| 全曲 285s | full 权重独立文件（`cfm_model_full.pt`），vendored `prepare_model` 按帧数选载（防错载）；超时自动 ×3；UI 开关仅在权重就绪时出现 |
+| 引擎探测 | faster_whisper/demucs 可用性后台探测（`/api/meta` 永不阻塞），流水线内同步等待（wait=True） |
+| 说唱类型 | rap 档案（小调 loop / BPM 自动分 boom-bap 与 trap 双鼓组 / 808 贝斯 / 稀疏暗色动机 / 默认纯 beat） |
+| 写词要求 | `lyrics_req` 字段贯通：AI 写词与 LLM 作曲双路遵循，计入结果指纹；文本亦参与 mock 的风格/情绪识别 |
+
 ### 11.2 生产加固（局域网部署形态）
 
 | 项 | 实现 |

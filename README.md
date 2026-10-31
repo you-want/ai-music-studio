@@ -154,7 +154,8 @@ ai-music-studio/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/compose` | `{description, genre, mood, duration_sec, bpm, provider, ref_audio?}` → `{job_id}` |
+| POST | `/api/compose` | `{description, genre, mood, duration_sec, bpm, provider, lyrics_req?, ref_audio?, full_song?}` → `{job_id}` |
+| POST | `/api/lyrics` | AI 写词：`{description, genre, mood, lyrics_req?}` → `{lyrics, source}` |
 | GET | `/api/jobs/{id}` | 任务进度（composing/arranging/rendering/singing_neural %） |
 | DELETE | `/api/jobs/{id}` | 取消任务（终止神经渲染子进程） |
 | POST | `/api/ref-audio` | 上传参考音频（wav/mp3/flac ≤25MB）→ `{ref_audio}` |
@@ -177,7 +178,7 @@ ai-music-studio/
 ## 测试
 
 ```bash
-cd backend && python3 -m unittest discover -s tests   # 79 个用例
+cd backend && python3 -m unittest discover -s tests   # 95 个用例
 ```
 
 ## 关于收费模型（现阶段的取舍）

@@ -237,7 +237,7 @@ AI_MUSIC_HOST=0.0.0.0 AI_MUSIC_TOKEN=你的口令 bash scripts/run.sh
 | 混响/母带 | `backend/app/music/synth.py` | `_master()` |
 | 演唱的移调极限/延音算法 | `backend/app/music/singer.py` | `render_sing_mono()` |
 
-改完跑测试：`cd backend && python3 -m unittest discover -s tests`（当前 47 个用例全绿）。
+改完跑测试：`cd backend && python3 -m unittest discover -s tests`（当前 95 个用例全绿）。
 
 ---
 
