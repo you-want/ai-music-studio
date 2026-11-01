@@ -363,6 +363,19 @@ class NeuralWorker:
 
     def run_job(self, job, timeout_min, progress_cb=None, cancel_event=None):
         progress_cb = progress_cb or (lambda frac, note: None)
+        try:
+            return self._run_job_once(job, timeout_min, progress_cb, cancel_event)
+        except AudioProviderError as e:
+            # worker 空闲自杀/意外退出（管道关闭）属瞬态故障：重启并重试一次。
+            # 取消与超时不重试（是明确意图）。
+            if "管道" in str(e) or "意外退出" in str(e) or "启动" in str(e):
+                progress_cb(0.0, "神经 worker 已重启（空闲回收），重试当前任务…")
+                with self._lock:
+                    self._kill()
+                return self._run_job_once(job, timeout_min, progress_cb, cancel_event)
+            raise
+
+    def _run_job_once(self, job, timeout_min, progress_cb=None, cancel_event=None):
         with self._lock:
             self._ensure()
             proc = self._proc

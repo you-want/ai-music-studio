@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.join(os.getcwd(), "infer"))  # infer_utils
 
 import torch  # noqa: E402
 
-SERVE_IDLE_SEC = 30 * 60
+SERVE_IDLE_SEC = 120 * 60
 SERVE_MAX_JOBS = 50
 CONSECUTIVE_ERROR_EXIT = 3
 
