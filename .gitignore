@@ -34,3 +34,9 @@ Thumbs.db
 .idea/
 .vscode/
 .screenshots/
+
+# ================= 并行会话的生成产物 / 测试残留（不入库） =================
+test-results/
+frontend/utilities.css
+frontend/themes-scoped.css
+frontend/han-scoped.css

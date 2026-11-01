@@ -462,19 +462,28 @@ button, a.ghost-btn {
 #btn-job-cancel:hover { color: #e8a0a0; border-color: rgba(196, 90, 90, 0.5); }
 
 /* ============================================================
-   13. 模式标签切换
+   13. 模式标签切换 — segmented control 风格
    ============================================================ */
-.mode-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
-.mode-tab {
-  flex: 1; padding: 9px 0; border-radius: var(--han-radius-md);
-  font-size: 14px; font-weight: 600;
-  background: var(--han-color-bg); color: var(--han-color-text-tertiary);
+.mode-tabs {
+  display: inline-flex; gap: 0; margin-bottom: 14px;
+  background: var(--han-color-bg);
   border: 1px solid var(--han-color-border);
-  transition: all var(--han-duration-normal) var(--han-ease-out);
+  border-radius: var(--han-radius-md);
+  padding: 3px;
 }
+.mode-tab {
+  flex: 1; padding: 6px 16px; border-radius: var(--han-radius-sm);
+  font-size: 13px; font-weight: 600;
+  background: transparent; color: var(--han-color-text-tertiary);
+  border: none; cursor: pointer;
+  transition: all var(--han-duration-normal) var(--han-ease-out);
+  white-space: nowrap;
+}
+.mode-tab:hover { color: var(--han-color-text-secondary); }
 .mode-tab[aria-selected="true"], .mode-tab.active {
-  background: linear-gradient(90deg, rgba(90, 173, 126, 0.22), rgba(111, 184, 196, 0.15));
-  color: var(--han-color-text-primary); border-color: var(--han-color-accent-control);
+  background: var(--han-seal-bg);
+  color: var(--han-seal-text);
+  box-shadow: 0 2px 8px rgba(90, 173, 126, 0.3);
 }
 .inline-btn { margin-left: 8px; }
 #lyrics { font-family: inherit; line-height: 1.7; }
@@ -572,7 +581,7 @@ footer {
   .song-list { grid-template-columns: 1fr; }
   .lib-head { flex-wrap: wrap; gap: 8px; }
   #lib-search { max-width: 100%; flex-basis: 100%; margin-left: 0; }
-  .mode-tab { font-size: 13px; padding: 7px 0; }
+  .mode-tab { font-size: 12px; padding: 5px 12px; }
   .card h2, .card h3 { font-size: 14px; }
   footer { margin-top: 32px; }
 }
