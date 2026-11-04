@@ -91,6 +91,7 @@ class _BodyTooLarge(Exception):
 class Handler(BaseHTTPRequestHandler):
     server_version = "AIMusicStudio/1.1"
     protocol_version = "HTTP/1.1"
+    _video_locks = {}  # song_id -> Lock：MV 导出防并发双写（见 _video）
 
     # ------------------------------------------------------------ 基础
     def log_message(self, fmt, *args):
@@ -115,24 +116,50 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _check_auth(self, path, query):
-        """Protect API requests with a bearer header or the session cookie."""
+        """Protect API requests with a bearer header or a derived session cookie."""
         if not STATE.token or path == "/api/health" or not path.startswith("/api/"):
             return None
-        supplied = ""
         auth = self.headers.get("Authorization") or ""
         if auth.startswith("Bearer "):
             supplied = auth[7:].strip()
-        if not supplied:
+            if supplied and hmac.compare_digest(supplied, STATE.token):
+                return None
+        else:
             cookie = SimpleCookie()
             try:
                 cookie.load(self.headers.get("Cookie", ""))
-                supplied = cookie.get("aimusic_session").value if cookie.get("aimusic_session") else ""
+                morsel = cookie.get("aimusic_session")
             except Exception:
-                supplied = ""
-        if supplied and hmac.compare_digest(supplied, STATE.token):
-            return None
+                morsel = None
+            if morsel and self._validate_session(morsel.value):
+                return None
         return self._send(401, {"error": "未授权：缺少或错误的访问 Token"},
                           extra={"WWW-Authenticate": "Bearer"})
+
+    SESSION_TTL_SEC = 43200  # 会话 Cookie 有效期（12 小时）
+
+    @staticmethod
+    def _session_value(exp):
+        """访问 Token 的派生会话凭证：HMAC(token, "v1:过期时间") + 过期时间。
+
+        Cookie 里不再保存原始 Token：泄漏 Cookie 只得到一个 12 小时后自动
+        作废的凭证；更换 AI_MUSIC_TOKEN 即可吊销全部会话；无服务端状态，
+        服务重启后依然有效。
+        """
+        msg = ("aimusic-session-v1:%d" % exp).encode("utf-8")
+        mac = hmac.new(STATE.token.encode("utf-8"), msg, "sha256").hexdigest()
+        return "%s.%d" % (mac, exp)
+
+    @classmethod
+    def _validate_session(cls, value):
+        try:
+            mac, exp_s = value.rsplit(".", 1)
+            exp = int(exp_s)
+        except (ValueError, AttributeError):
+            return False
+        if exp <= time.time() or exp > int(time.time()) + cls.SESSION_TTL_SEC * 2:
+            return False
+        return hmac.compare_digest(mac + "." + exp_s, cls._session_value(exp))
 
     def _json_body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -198,10 +225,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 return self._send(200, {"ok": True, "name": "SongWeaver (织歌)"})
             if path == "/api/session" and method == "POST":
+                # 用一次性 Bearer 换取派生会话 Cookie（Cookie 不落原始 Token）
+                if not STATE.token:
+                    return self._send(200, {"ok": True})
                 secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+                exp = int(time.time()) + Handler.SESSION_TTL_SEC
                 return self._send(200, {"ok": True}, extra={
-                    "Set-Cookie": "aimusic_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200%s"
-                    % (STATE.token, secure)})
+                    "Set-Cookie": "aimusic_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+                    % (Handler._session_value(exp), Handler.SESSION_TTL_SEC, secure)})
             if path == "/api/meta" and method == "GET":
                 return self._send(200, {
                     "genres": [{"id": g, "label": schemas.GENRE_LABELS_ZH[g]} for g in schemas.GENRES],
@@ -692,25 +723,41 @@ class Handler(BaseHTTPRequestHandler):
                           {"Content-Disposition": "attachment; filename*=UTF-8''%s" % fname})
 
     def _video(self, song_id, song_dir):
-        """MV 导出：封面图 + 音频 -> mp4（ffmpeg，首次生成后缓存）。"""
+        """MV 导出：封面图 + 音频 -> mp4（ffmpeg，首次生成后缓存）。
+
+        并发安全：per-song 锁防双跑；ffmpeg 先写 .part 再 os.replace 原子落盘，
+        避免两个请求同时写 video.mp4 产出损坏文件。
+        """
         if not shutil.which("ffmpeg"):
             return self._send(501, {"error": "未安装 ffmpeg，无法导出 MV（brew install ffmpeg）"})
         mp4 = os.path.join(song_dir, "video.mp4")
-        if not os.path.isfile(mp4):
-            cover = self._ensure_cover(song_id, song_dir)
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-loop", "1", "-i", cover,
-                     "-i", STATE.lib.wav_path(song_id),
-                     "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
-                     "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart",
-                     mp4],
-                    capture_output=True, timeout=300, check=True)
-            except subprocess.CalledProcessError as e:
-                return self._send(500, {"error": "ffmpeg 失败: %s"
-                                        % e.stderr.decode("utf-8", "ignore")[-300:]})
-            except subprocess.TimeoutExpired:
-                return self._send(500, {"error": "ffmpeg 超时"})
+        # setdefault 原子取/建锁：同一首歌并发导出时串行，不同歌互不影响
+        with Handler._video_locks.setdefault(song_id, threading.Lock()):
+            if not os.path.isfile(mp4):
+                cover = self._ensure_cover(song_id, song_dir)
+                part = mp4 + ".part"
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-loop", "1", "-i", cover,
+                         "-i", STATE.lib.wav_path(song_id),
+                         "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+                         "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart",
+                         # 输出是 .part 临时名，ffmpeg 无法从扩展名推断封装格式，须显式指定
+                         "-f", "mp4", part],
+                        capture_output=True, timeout=300, check=True)
+                    os.replace(part, mp4)
+                except subprocess.CalledProcessError as e:
+                    return self._send(500, {"error": "ffmpeg 失败: %s"
+                                            % e.stderr.decode("utf-8", "ignore")[-300:]})
+                except subprocess.TimeoutExpired:
+                    return self._send(500, {"error": "ffmpeg 超时"})
+                finally:
+                    # 成功时 .part 已被 replace 走（remove 抛 FileNotFoundError 被吞）；
+                    # 失败/超时清掉残留半成品
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
         size = os.path.getsize(mp4)
         self.send_response(200)
         self.send_header("Content-Type", "video/mp4")
