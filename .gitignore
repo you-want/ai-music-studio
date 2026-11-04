@@ -37,6 +37,5 @@ Thumbs.db
 
 # ================= 并行会话的生成产物 / 测试残留（不入库） =================
 test-results/
-frontend/utilities.css
-frontend/themes-scoped.css
-frontend/han-scoped.css
+# 注意：frontend/*.css 是运行时必需资源（index.html -> han-scoped.css -> @import 链），
+# 必须全部入库，否则全新 clone 部署样式层 404。不要把 CSS 加进忽略列表。
