@@ -10,7 +10,8 @@ torch CPU）里进行，本模块只负责编排：探测可用性、拼装任�
 配置（config.local.json 可选 "neural" 节，或环境变量）：
     neural.python        AI_MUSIC_NEURAL_PYTHON   venv 解释器（默认 DiffRhythm/.venv-neural）
     neural.steps         AI_MUSIC_NEURAL_STEPS    CFM 采样步数 2-64（默认 16）
-    neural.timeout_min   AI_MUSIC_NEURAL_TIMEOUT  95s 单曲超时分钟（默认 90，285s 自动 x3）
+    neural.timeout_min   AI_MUSIC_NEURAL_TIMEOUT  95s 单曲超时分钟（默认 150，按 16 步标定；
+                                                  285s 自动 x3；steps>16 时按步数等比放大）
     neural.device        AI_MUSIC_NEURAL_DEVICE   cpu / mps / cuda（默认 cpu，cuda 自动）
     neural.audio_length  AI_MUSIC_NEURAL_LENGTH   95 或 285（285 需 full 权重）
     neural.whisper_model AI_MUSIC_NEURAL_WHISPER  对齐用 whisper 模型（默认 small）
@@ -272,11 +273,21 @@ class DiffRhythmProvider(AudioProvider):
             json.dump(job, f, ensure_ascii=False)
 
         # 常驻 worker：模型只加载一次，超时/取消杀掉 worker（下次任务自动重启重载）
-        timeout_min = cfg["timeout_min"] * (1 if audio_length == 95 else 3)
-        done = _WORKER.run_job(job, timeout_min, progress_cb, cancel_event)
-        if not os.path.isfile(out_wav):
-            raise AudioProviderError("DiffRhythm 未产出音频文件")
-        return done
+        # 超时预算随采样步数缩放：默认 150 分钟按 16 步标定，steps=32 时工作量翻倍
+        # （实测本机 32 步在无竞争下也需 ~60 分钟，热节流时更久——150 分钟会误杀）
+        timeout_min = cfg["timeout_min"] * (1 if audio_length == 95 else 3) \
+            * max(1.0, cfg["steps"] / 16.0)
+        try:
+            done = _WORKER.run_job(job, timeout_min, progress_cb, cancel_event)
+            if not os.path.isfile(out_wav):
+                raise AudioProviderError("DiffRhythm 未产出音频文件")
+            return done
+        finally:
+            # 任务文件（含本机绝对路径）只在投递期间需要，不留进作品目录
+            try:
+                os.remove(job_path)
+            except OSError:
+                pass
 
 
 def _wav_duration(path):
@@ -574,8 +585,14 @@ def separate(wav, out_dir, config_path=None, progress_cb=None, cancel_event=None
     out_dir = os.path.abspath(out_dir)  # 子进程 cwd 不同，全部路径必须绝对
     job = {"wav": os.path.abspath(wav), "out_dir": out_dir,
            "model": "htdemucs", "_job_path": os.path.join(out_dir, "demucs_job.json")}
-    done = _run_subprocess_job(DEMUCS_RUNNER, job, 30, config_path, progress_cb, cancel_event)
-    return (done or {}).get("stems") or {}
+    try:
+        done = _run_subprocess_job(DEMUCS_RUNNER, job, 30, config_path, progress_cb, cancel_event)
+        return (done or {}).get("stems") or {}
+    finally:
+        try:
+            os.remove(job["_job_path"])
+        except OSError:
+            pass
 
 
 def lite_score(spec, duration_sec, lyric_events=None):
