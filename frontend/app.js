@@ -231,7 +231,7 @@ async function generate(overrides, sourceParams) {
     state.jobStartedAt = Date.now();
     state.pollFailures = 0;
     $("btn-job-cancel").classList.remove("hidden");
-    pollJobs(ids);
+    pollJobs(ids, dual ? ["版本 A", "版本 B"] : null);
   } catch (e) {
     alert("出错了：" + e.message);
     btn.disabled = false;
@@ -246,7 +246,7 @@ async function cancelJob() {
   }
 }
 
-function pollJobs(jobIds) {
+function pollJobs(jobIds, labels) {
   clearTimeout(state.pollTimer);
   const poll = async () => {
     try {
@@ -260,9 +260,14 @@ function pollJobs(jobIds) {
       const running = jobs.filter((j) => !["done", "error", "canceled"].includes(j.status));
       const avg = Math.round(jobs.reduce((s, j) => s + (j.progress || 0), 0) / jobs.length * 100);
       let stage;
-      if (jobs.length > 1) {
-        stage = "版本 A：" + (jobs[0].stage_note || jobs[0].stage)
-          + " ／ 版本 B：" + (jobs[1].stage_note || jobs[1].stage);
+      if (jobs.length > 1 && labels && labels.length === jobs.length) {
+        // 双版本候选：按 A/B 分别展示
+        stage = labels.map((lb, i) => lb + "：" + (jobs[i].stage_note || jobs[i].stage)).join(" ／ ");
+      } else if (jobs.length > 1) {
+        // 专辑等多任务：聚合展示（已完成 N/M + 当前阶段的第一个任务）
+        const cur = running[0] || failed[0] || canceled[0] || jobs[0];
+        stage = "共 " + jobs.length + " 个任务（已完成 " + done.length + "）· "
+          + (cur.stage_note || cur.stage || "…");
       } else {
         stage = jobs[0].stage_note || jobs[0].stage;
       }
@@ -689,6 +694,9 @@ function bindPlayer() {
     updateLyric(beat);
   };
   audio.onended = () => { playBtn.textContent = "▶"; drawSpectrum(); };
+  audio.onerror = () => {
+    if (audio.src) $("lyric-now").textContent = "⚠️ 音频加载失败（文件缺失或服务不可达）";
+  };
 
   $("seek").onclick = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1366,5 +1374,4 @@ function bindEvents() {
       sessionStorage.removeItem(ACTIVE_JOBS_KEY);
     }
   }
-  window.addEventListener("resize", () => { if (state.score) drawRoll(); });
 }

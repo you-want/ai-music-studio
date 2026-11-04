@@ -23,6 +23,10 @@ class Library:
     def __init__(self, lib_dir):
         self.lib_dir = lib_dir
         os.makedirs(lib_dir, exist_ok=True)
+        # fingerprint -> song_id 内存索引：find_fingerprint 从 O(n) 全盘扫描降为 O(1)。
+        # 启动时扫描一次建索引，之后 save/delete 增量维护；索引过期由 find 惰性重建兜底。
+        self._fp_index = {}
+        self._rebuild_fp_index()
 
     def new_song_id(self):
         return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -83,6 +87,8 @@ class Library:
         self._write_json(os.path.join(d, "meta.json"), meta)
         self._write_json(os.path.join(d, "song.json"), spec)
         self._write_json(os.path.join(d, "score.json"), score)
+        if fingerprint:
+            self._fp_index[fingerprint] = song_id
         return meta
 
     @staticmethod
@@ -123,13 +129,29 @@ class Library:
         out.sort(key=lambda m: (not m.get("favorite", False), -m.get("created_at", 0)))
         return out
 
+    def _rebuild_fp_index(self):
+        """全量重建指纹索引（启动时 / 索引过期兜底）。"""
+        index = {}
+        for meta in self.list_songs():
+            fp = meta.get("fingerprint")
+            sid = meta.get("id")
+            if fp and sid and fp not in index:
+                index[fp] = sid
+        self._fp_index = index
+
     def find_fingerprint(self, fp):
-        """按参数指纹找已有作品（结果复用缓存）。"""
+        """按参数指纹找已有作品（结果复用缓存；内存索引 O(1)）。"""
         if not fp:
             return None
-        for meta in self.list_songs():
-            if meta.get("fingerprint") == fp:
-                return meta
+        sid = self._fp_index.get(fp)
+        if sid and self.exists(sid):
+            return self.get_meta(sid)
+        if sid:
+            # 索引指向的作品已不存在（被外部删除等）→ 重建一次再试
+            self._rebuild_fp_index()
+            sid = self._fp_index.get(fp)
+            if sid and self.exists(sid):
+                return self.get_meta(sid)
         return None
 
     def rename(self, song_id, title):
@@ -176,6 +198,13 @@ class Library:
     def delete(self, song_id):
         d = self.song_dir(song_id)
         if os.path.isdir(d):
+            fp = None
+            try:
+                fp = self.get_meta(song_id).get("fingerprint")
+            except (OSError, ValueError):
+                pass
             shutil.rmtree(d)
+            if fp and self._fp_index.get(fp) == song_id:
+                self._fp_index.pop(fp, None)
             return True
         return False

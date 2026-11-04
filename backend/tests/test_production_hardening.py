@@ -132,5 +132,138 @@ class TestDiskGc(unittest.TestCase):
         self.assertTrue(os.path.exists(protected))
 
 
+class TestSubmitDedup(unittest.TestCase):
+    """同参数并发提交去重：第二次提交应复用进行中的任务，不重复渲染/计费。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="aimusic-dedup-")
+        self.lib = Library(os.path.join(self.tmp, "lib"))
+        self.jm = JobManager(store=self.lib, config_getter=lambda: {"llm": {}})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_concurrent_same_params_share_one_job(self):
+        from app import schemas
+        req = schemas.parse_request(
+            {"description": "去重测试小曲", "duration_sec": 15, "seed": 4242})
+        id1 = self.jm.submit(dict(req))
+        id2 = self.jm.submit(dict(req))  # 任务 1 仍在渲染中（毫秒级内提交）
+        self.assertEqual(id1, id2)
+        self.assertEqual(len([j for j in self.jm._jobs.values()
+                              if j["status"] in ("queued", "running")]), 1)
+        # 等任务收尾，避免 teardown 与后台线程竞争临时目录
+        for _ in range(600):
+            st = self.jm.status(id1)
+            if st["status"] in ("done", "error", "canceled"):
+                break
+            time.sleep(0.1)
+        self.assertEqual(st["status"], "done", st.get("error"))
+        # 任务结束后同参数再提交 → 命中结果缓存（也只此一份）
+        id3 = self.jm.submit(dict(req))
+        st3 = self.jm.status(id3)
+        self.assertTrue(st3["result"]["cached"])
+
+
+class TestLocalRenderCancel(unittest.TestCase):
+    """本地合成渲染进行中的取消：progress_cb 检查后应立即中止并清掉半成品。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="aimusic-cancel-")
+        self.lib = Library(os.path.join(self.tmp, "lib"))
+        self.jm = JobManager(store=self.lib, config_getter=lambda: {"llm": {}})
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_cancel_during_render(self):
+        import app.jobs as jobs_mod
+        from app import schemas
+
+        def fake_render(song, wav_path, stems_dir, progress_cb=None):
+            for i in range(100):  # 模拟 10 秒渲染，逐组上报进度
+                if progress_cb:
+                    progress_cb(i / 100.0)
+                time.sleep(0.1)
+            return wav_path, []
+
+        orig = (jobs_mod.realizer.realize, jobs_mod.synth.render_all,
+                jobs_mod.singer.available_voice)
+        jobs_mod.realizer.realize = lambda spec: {"genre": spec.get("genre")}
+        jobs_mod.synth.render_all = fake_render
+        jobs_mod.singer.available_voice = lambda: None
+        try:
+            req = schemas.parse_request(
+                {"description": "取消测试", "duration_sec": 15, "seed": 7})
+            jid = self.jm.submit(dict(req))
+            song_id = None
+            for _ in range(100):
+                st = self.jm.status(jid)
+                song_id = st.get("song_id") or song_id
+                if st["stage"] == "rendering":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(st["stage"], "rendering")
+            self.assertTrue(self.lib.exists(song_id) or
+                            os.path.isdir(self.lib.song_dir(song_id)))
+            self.jm.cancel(jid)
+            for _ in range(100):
+                st = self.jm.status(jid)
+                if st["status"] in ("canceled", "done", "error"):
+                    break
+                time.sleep(0.1)
+            self.assertEqual(st["status"], "canceled", st)
+            self.assertFalse(os.path.isdir(self.lib.song_dir(song_id)),
+                             "取消后半成品目录应被清理")
+        finally:
+            (jobs_mod.realizer.realize, jobs_mod.synth.render_all,
+             jobs_mod.singer.available_voice) = orig
+
+
+class TestFingerprintIndex(unittest.TestCase):
+    """曲库指纹内存索引：O(1) 查询、写时维护、外部删除后惰性重建。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="aimusic-fp-")
+        self.lib = Library(os.path.join(self.tmp, "lib"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _spec(title):
+        return {"title": title, "description": "", "genre": "pop", "mood": "happy",
+                "key": "C", "mode": "major", "bpm": 100,
+                "structure": [{"name": "verse", "bars": 4, "chords": ["C"], "lyrics": []}]}
+
+    def _save(self, title, fp):
+        sid = self.lib.new_song_id()
+        self.lib.prepare(sid)
+        self.lib.save(sid, self._spec(title), {"duration_sec": 10.0}, fingerprint=fp)
+        return sid
+
+    def test_save_find_delete_maintain_index(self):
+        sid1 = self._save("歌一", "fp-1")
+        sid2 = self._save("歌二", "fp-2")
+        self.assertEqual(self.lib.find_fingerprint("fp-1")["id"], sid1)
+        self.assertEqual(self.lib.find_fingerprint("fp-2")["id"], sid2)
+        self.assertIsNone(self.lib.find_fingerprint("fp-none"))
+        self.lib.delete(sid1)
+        self.assertIsNone(self.lib.find_fingerprint("fp-1"))
+        self.assertEqual(self.lib.find_fingerprint("fp-2")["id"], sid2)
+
+    def test_stale_index_rebuilt_lazily(self):
+        sid = self._save("歌", "fp-x")
+        self.assertEqual(self.lib.find_fingerprint("fp-x")["id"], sid)
+        # 绕过 Library.delete 模拟外部删除，并把索引指向已消失的作品
+        shutil.rmtree(self.lib.song_dir(sid))
+        self.lib._fp_index["fp-x"] = sid
+        self.assertIsNone(self.lib.find_fingerprint("fp-x"))
+        # 重建后的索引与磁盘一致：重新保存可再命中
+        sid2 = self._save("歌二", "fp-y")
+        self.assertEqual(self.lib.find_fingerprint("fp-y")["id"], sid2)
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -206,6 +206,10 @@ DiffRhythm/.venv-neural/bin/python backend/neural/selftest.py --mini   # 自检�
 产物照常做歌词对齐与分轨。也可 `config.local.json` 写
 `"mureka": {"enabled": true, "api_key": "..."}` 或环境变量 `AI_MUSIC_MUREKA_KEY`。
 
+> 注意：取消 Mureka 任务只是本地停止等待，**云端任务会继续执行并照常计费**
+> （官方接口未提供取消能力）。同参数重复提交会被自动去重（复用进行中的任务），
+> 但换参数的重复提交会各自产生一次云端调用。
+
 ### 参考音频风格迁移（v4）
 
 进阶模式选神经歌声后可上传 **≥10 秒** wav/mp3/flac（`POST /api/ref-audio`），

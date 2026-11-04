@@ -66,7 +66,9 @@ class JobManager:
         self._neural_slot = threading.BoundedSemaphore(MAX_NEURAL_SLOTS)
         self._job_dir = (os.path.join(self.store.lib_dir, "_jobs")
                          if self.store is not None else None)
-        self._job_refs = {}  # job_id -> 参考音频文件名（清理 _refs 时保护进行中任务）
+        self._job_refs = {}   # job_id -> 参考音频文件名（清理 _refs 时保护进行中任务）
+        self._job_fps = {}    # job_id -> 参数指纹（结束时撤销 in-flight 去重标记）
+        self._inflight_fps = {}  # 参数指纹 -> 进行中 job_id（同参数并发提交去重）
         if self._job_dir:
             os.makedirs(self._job_dir, exist_ok=True)
             self._load_interrupted_jobs()
@@ -116,14 +118,24 @@ class JobManager:
         job = {"id": job_id, "status": "queued", "stage": "queued",
                "stage_note": STAGES_ZH["queued"], "progress": 0.0,
                "created_at": time.time(), "error": None, "result": None}
+        # 结果复用缓存：同参数(+seed)视为同一首（提交前先算指纹，供去重与缓存）
+        fp = store_mod.fingerprint_of(req)
         with self._lock:
             pending = sum(1 for item in self._jobs.values()
                           if item["status"] in ("queued", "running"))
             if pending >= MAX_PENDING_JOBS:
                 raise RuntimeError("任务队列已满（最多同时保留 %d 个未完成任务），请稍后重试"
                                    % MAX_PENDING_JOBS)
+            # 同参数并发去重：同样的请求已在排队/渲染时直接复用那个任务，
+            # 防止双击或双端重复提交造成重复渲染 / 云端引擎重复计费
+            prior = self._inflight_fps.get(fp)
+            if prior is not None and prior in self._jobs \
+                    and self._jobs[prior]["status"] in ("queued", "running"):
+                return prior
             self._jobs[job_id] = job
             self._cancel_events[job_id] = threading.Event()
+            self._job_fps[job_id] = fp
+            self._inflight_fps[fp] = job_id
             ref_name = req.get("ref_audio")
             if isinstance(ref_name, str) and ref_name:
                 self._job_refs[job_id] = ref_name
@@ -135,8 +147,7 @@ class JobManager:
                 for old in sorted(terminal, key=lambda j: j["created_at"])[:len(self._jobs) - 100]:
                     self._jobs.pop(old["id"], None)
                     self._cancel_events.pop(old["id"], None)
-        # 结果复用缓存：同参数(+seed)直接返回已有作品
-        fp = store_mod.fingerprint_of(req)
+                    self._drop_inflight(old["id"])
         hit = self.store.find_fingerprint(fp)
         if hit:
             job.update(status="done", stage="done", progress=1.0,
@@ -144,10 +155,18 @@ class JobManager:
                        result={"song_id": hit["id"], "title": hit["title"],
                                "duration_sec": hit["duration_sec"],
                                "provider": hit.get("provider", "mock"), "cached": True})
+            with self._lock:
+                self._drop_inflight(job_id)  # 命中缓存即终态，撤销去重标记
             self._persist(job)
             return job_id
         threading.Thread(target=self._run, args=(job, dict(req), fp), daemon=True).start()
         return job_id
+
+    def _drop_inflight(self, job_id):
+        """撤销某任务的 in-flight 去重标记（仍持有 self._lock 时调用）。"""
+        fp = self._job_fps.pop(job_id, None)
+        if fp is not None and self._inflight_fps.get(fp) == job_id:
+            self._inflight_fps.pop(fp, None)
 
     def status(self, job_id):
         with self._lock:
@@ -173,6 +192,7 @@ class JobManager:
         with self._lock:
             self._cancel_events.pop(job_id, None)
             self._job_refs.pop(job_id, None)
+            self._drop_inflight(job_id)
 
     def _gc_disk(self):
         """磁盘残留清理（submit 与启动时顺带执行）：过期任务快照与参考音频。
@@ -272,9 +292,14 @@ class JobManager:
                 job.update(song_id=song_id)
 
                 job.update(stage="rendering", stage_note=STAGES_ZH["rendering"], progress=0.08)
+
+                def _render_progress(f):
+                    self._check_cancel(ev)  # 渲染分组合间响应取消，不再等整曲渲染完
+                    job.update(progress=0.08 + 0.82 * f)
+
                 synth.render_all(song, self.store.wav_path(song_id),
                                  self.store.song_dir(song_id),
-                                 progress_cb=lambda f: job.update(progress=0.08 + 0.82 * f))
+                                 progress_cb=_render_progress)
                 midi.write_midi_file(song, self.store.midi_path(song_id))
             meta = self.store.save(song_id, spec, song, fingerprint=fp, request=req)
             self._done(job, meta, info.get("provider", "mock"))
