@@ -131,6 +131,19 @@ class TestRapGenre(unittest.TestCase):
 class TestLyricsReq(unittest.TestCase):
     """写词要求：解析净化、指纹区分、风格/情绪识别参与。"""
 
+    def test_audio_provider_selection_is_preserved(self):
+        for provider in ("diffrhythm", "mureka"):
+            with self.subTest(provider=provider):
+                self.assertEqual(schemas.parse_request({"provider": provider})["provider"],
+                                 provider)
+
+    def test_local_first_defaults_and_invalid_provider_rejection(self):
+        req = schemas.parse_request({})
+        self.assertEqual(req["provider"], "local")
+        self.assertEqual(req["composer_provider"], "mock")
+        with self.assertRaises(schemas.RequestError):
+            schemas.parse_request({"provider": "typo-cloud"})
+
     def test_parse_sanitize(self):
         req = schemas.parse_request({"lyrics_req": "  写一个\n\n深夜便利店的故事，押 an 韵  "})
         self.assertEqual(req["lyrics_req"], "写一个 深夜便利店的故事，押 an 韵")

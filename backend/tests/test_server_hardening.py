@@ -97,11 +97,27 @@ class TestTokenAuth(_ServerBase):
         self.assertEqual(st, 200)
         self.assertIn("genres", json.loads(body))
 
-    def test_query_token_ok_for_media(self):
+    def test_session_cookie_authenticates_media_and_api(self):
+        st, headers, body = self.raw_request(
+            "POST", "/api/session", headers={"Authorization": "Bearer " + TOKEN})
+        self.assertEqual(st, 200)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.assertIn("SameSite=Strict", headers["Set-Cookie"])
         st, _, body = self.raw_request(
-            "GET", "/api/songs/%s/audio.wav?token=%s" % (self.SONG_ID, TOKEN))
+            "GET", "/api/songs/%s/audio.wav" % self.SONG_ID,
+            headers={"Cookie": cookie})
         self.assertEqual(st, 200)
         self.assertEqual(body[:4], b"RIFF")
+        st, _, _ = self.raw_request("POST", "/api/config",
+                                     body=json.dumps({}).encode(),
+                                     headers={"Cookie": cookie})
+        self.assertEqual(st, 200)
+
+    def test_query_token_is_rejected(self):
+        st, _, _ = self.raw_request(
+            "GET", "/api/songs/%s/audio.wav?token=%s" % (self.SONG_ID, TOKEN))
+        self.assertEqual(st, 401)
 
     def test_wrong_token_401(self):
         st, _, _ = self.raw_request("GET", "/api/meta?token=wrong")

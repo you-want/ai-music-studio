@@ -87,7 +87,7 @@ Python 官方文档明确 `http.server` 不建议直接生产暴露。本地工�
 | 项 | 做法 | 状态 |
 |---|---|---|
 | 绑定 | 默认 127.0.0.1；`AI_MUSIC_HOST=0.0.0.0` 时**强制**要求 `AI_MUSIC_TOKEN`，否则拒启 | ✅ |
-| 鉴权 | `/api/*` Bearer Token（`hmac.compare_digest`）；GET 媒体支持 `?token=`；静态页开放（JS 自带 token） | ✅ |
+| 鉴权 | `/api/*` Bearer Token 或 HttpOnly 会话 Cookie（`hmac.compare_digest`）；静态页开放，浏览器入口换取 Cookie | ✅ |
 | 路径穿越 | 静态服务 `os.path.commonpath` 校验（替换可绕过的 `startswith`） | ✅ |
 | 请求体 | JSON 1MB / 参考音频 25MB 上限，超出 413；上传文件名服务端生成 + 白名单净化 | ✅ |
 | Range | 修复后缀 `bytes=-N` 语义、非法区间 416；文件分块流式发送（不再整读内存） | ✅ |

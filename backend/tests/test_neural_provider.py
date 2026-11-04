@@ -1,5 +1,6 @@
 """神经歌声引擎（DiffRhythm Provider）测试：单元 + 桩子进程端到端。"""
 import json
+import io
 import os
 import re
 import shutil
@@ -9,7 +10,9 @@ import textwrap
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.request
+import urllib.error
 import wave
 
 import numpy as np
@@ -618,6 +621,16 @@ class TestMurekaClient(unittest.TestCase):
             self.assertFalse(ok)
         finally:
             mk.load_mureka_config = orig
+
+    def test_generation_post_is_not_retried_after_ambiguous_failure(self):
+        p = mk.MurekaProvider()
+        failure = urllib.error.HTTPError("https://api.mureka.ai/v1/song/generate",
+                                         503, "unavailable", {}, io.BytesIO(b"busy"))
+        with mock.patch("app.providers.mureka.urllib.request.urlopen", side_effect=failure) as call:
+            with self.assertRaises(mk.AudioProviderError):
+                p._request("POST", "https://api.mureka.ai/v1/song/generate",
+                           {"api_key": "test"}, body={"model": "mureka-6"})
+        self.assertEqual(call.call_count, 1)
 
 
 class TestPersonaStore(unittest.TestCase):

@@ -4,6 +4,7 @@
 默认 http://127.0.0.1:8766（可用环境变量 AI_MUSIC_PORT 覆盖）
 """
 import hmac
+from http.cookies import SimpleCookie
 import json
 import os
 import random
@@ -11,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -92,7 +94,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ 基础
     def log_message(self, fmt, *args):
-        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+        message = fmt % args
+        # Query-string bearer tokens must never land in access logs.
+        message = re.sub(r"([?&]token=)[^& ]+", r"\1<redacted>", message)
+        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), message))
 
     def _send(self, code, body, content_type="application/json; charset=utf-8", extra=None):
         if isinstance(body, (dict, list)):
@@ -110,17 +115,20 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _check_auth(self, path, query):
-        """AI_MUSIC_TOKEN 设置后：/api/* 需 Authorization: Bearer；
-        GET/HEAD（媒体/下载）额外接受 ?token=（<audio>/<a> 标签带不了 header）。
-        静态页面不拦：前端 JS 从 URL ?token= 取值后给所有 API 请求带上鉴权。"""
+        """Protect API requests with a bearer header or the session cookie."""
         if not STATE.token or path == "/api/health" or not path.startswith("/api/"):
             return None
         supplied = ""
         auth = self.headers.get("Authorization") or ""
         if auth.startswith("Bearer "):
             supplied = auth[7:].strip()
-        if not supplied and self.command in ("GET", "HEAD"):
-            supplied = (query.get("token") or [""])[0]
+        if not supplied:
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+                supplied = cookie.get("aimusic_session").value if cookie.get("aimusic_session") else ""
+            except Exception:
+                supplied = ""
         if supplied and hmac.compare_digest(supplied, STATE.token):
             return None
         return self._send(401, {"error": "未授权：缺少或错误的访问 Token"},
@@ -189,6 +197,11 @@ class Handler(BaseHTTPRequestHandler):
                 return denied
             if path == "/api/health":
                 return self._send(200, {"ok": True, "name": "SongWeaver (织歌)"})
+            if path == "/api/session" and method == "POST":
+                secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+                return self._send(200, {"ok": True}, extra={
+                    "Set-Cookie": "aimusic_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200%s"
+                    % (STATE.token, secure)})
             if path == "/api/meta" and method == "GET":
                 return self._send(200, {
                     "genres": [{"id": g, "label": schemas.GENRE_LABELS_ZH[g]} for g in schemas.GENRES],
@@ -315,7 +328,13 @@ class Handler(BaseHTTPRequestHandler):
                     req["ref_audio_path"] = ref
                 if not req["description"] and req["genre"] == "auto":
                     req["description"] = "一段随机的心情小曲"
-                job_id = STATE.jobs.submit(req)
+                try:
+                    job_id = STATE.jobs.submit(req)
+                except RuntimeError as e:
+                    if "任务队列已满" in str(e):
+                        return self._send(429, {"error": str(e), "retry_after_sec": 10},
+                                          extra={"Retry-After": "10"})
+                    raise
                 return self._send(200, {"job_id": job_id})
             m = re.match(r"^/api/jobs/([\w-]+)$", path)
             if m and method == "GET":
@@ -348,6 +367,8 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/"):
                 return self._send(404, {"error": "unknown api"})
             return self._static(path)
+        except schemas.RequestError as e:
+            return self._send(400, {"error": str(e)})
         except (BrokenPipeError, ConnectionResetError):
             pass
         except _BodyTooLarge:
@@ -373,6 +394,23 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     @staticmethod
+    def _atomic_json_write(path, data):
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
     def _save_neural(config_path, neural_body):
         """设置弹窗提交的 neural 节（采样步数）合并写回 config.local.json。"""
         try:
@@ -387,8 +425,7 @@ class Handler(BaseHTTPRequestHandler):
         merged = dict(data.get("neural") or {})
         merged["steps"] = steps
         data["neural"] = merged
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        Handler._atomic_json_write(config_path, data)
 
     @staticmethod
     def _save_mureka(config_path, mureka_body):
@@ -409,8 +446,7 @@ class Handler(BaseHTTPRequestHandler):
             merged = dict(data.get("mureka") or {})
             merged.update(section)
             data["mureka"] = merged
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            Handler._atomic_json_write(config_path, data)
 
     # ------------------------------------------------------------ 曲库
     def _song_route(self, method, song_id):
@@ -648,7 +684,8 @@ class Handler(BaseHTTPRequestHandler):
                 if stem.startswith("stem_") and stem.endswith(".wav"):
                     z.write(os.path.join(song_dir, stem), stem)
             z.writestr("lyrics.txt", self._lyrics_text(song_id))
-            z.writestr("cover.png", open(self._ensure_cover(song_id, song_dir), "rb").read())
+            with open(self._ensure_cover(song_id, song_dir), "rb") as f:
+                z.writestr("cover.png", f.read())
         title = lib.get_meta(song_id).get("title", song_id)
         fname = urllib.parse.quote("%s-分享包.zip" % title)
         return self._send(200, buf.getvalue(), "application/zip",

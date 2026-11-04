@@ -1,8 +1,7 @@
 # 织歌 SongWeaver（AI Music Studio）— 设计文档
 
-> 一个完全本地运行的 AI 音乐创作程序：输入一句描述，产出可播放、可下载（WAV / MIDI）的完整编曲。
-> 默认使用 **离线 Mock 作曲引擎**（零配置、零费用），可一键切换到 **免费大模型**（智谱 GLM-4-Flash），
-> 并为付费音乐生成 API（Suno / Udio 等）预留了 Provider 扩展位。
+> SongWeaver 是本地优先的 AI 音乐创作工具：输入一句描述，产出可播放、可下载的音乐作品。
+> 作曲决策和音频生成是独立选择。默认完全离线；只有用户明确选择后，才会把文本发送给 LLM，或把内容发送给云端音频 API。
 
 ## 1. 目标与约束
 
@@ -14,8 +13,7 @@
 | 可视化 | 网页端钢琴卷帘（Piano Roll）+ 卡拉OK式歌词 + 分区结构图 |
 | 确定性可复现 | 同一 seed 生成完全相同的曲子（Mock 引擎） |
 
-**不做什么（v1）**：人声合成/演唱（需要 Suno 级别的歌声模型，见 §8 路线图）、
-云端分布式、用户系统。
+首发边界：单用户本机运行，不提供多用户账号、云端队列或公网服务。局域网访问必须由部署者配置 Token，并应通过反向代理提供 TLS。
 
 ## 2. 总体架构
 
@@ -32,7 +30,7 @@
 │ providers/  ── 作曲 Provider 抽象（核心扩展点）                              │
 │   ├─ mock.py     离线算法作曲：关键词理解→和声→结构→歌词                     │
 │   └─ llm.py      OpenAI 兼容 Chat API（GLM-4-Flash 免费额度/本地 Ollama…）  │
-│                  输出 SongSpec JSON，校验失败自动回落 Mock                   │
+│                  输出 SongSpec JSON，校验失败返回明确错误                   │
 │                                                                            │
 │ music/                                                                     │
 │   ├─ theory.py   音名/音阶/和弦解析（MIDI 编号体系 C4=60）                   │
@@ -60,8 +58,8 @@
 ```
 
 **关键设计：LLM 只负责"作曲决策"（和声、结构、歌词、速度、调式），
-音符级展开交给确定性编曲器。** 这样即使 LLM 输出不合规，也有 schemas 校验修复 +
-Mock 回落双保险，永远不会产出"坏歌"。
+音符级展开交给确定性编曲器。** LLM 输出先经过 schemas 校验和修复；无法修复时任务明确失败，
+用户可以切回本地作曲重试，避免远程故障被静默掩盖。
 
 ## 3. SongSpec（Provider 输出契约）
 
@@ -91,7 +89,7 @@ Mock 回落双保险，永远不会产出"坏歌"。
 
 `schemas.validate_and_repair_spec()` 是所有 Provider 输出的必经之路：
 类型收敛、BPM 钳制(60–184)、和弦符号合法性校验、按目标时长增删小节、
-歌词按小节对齐。无法修复 → 抛 `SpecError` → 上层回落 Mock。
+歌词按小节对齐。无法修复 → 抛 `SpecError` → 远程作曲任务明确失败，可选择本地作曲重试。
 
 ## 4. 编曲器（realizer.py）规则摘要
 
@@ -123,15 +121,17 @@ provide(req) -> (SongSpec | None, info)
 
 | Provider | 说明 | 配置 |
 |---|---|---|
-| `mock` | 离线算法作曲，永远可用，确定性 | 无 |
-| `llm` | OpenAI 兼容 `/chat/completions`；默认智谱 `glm-4-flash`（**免费**），也支持 DeepSeek/OpenAI/本地 Ollama | 环境变量 `AI_MUSIC_LLM_BASE_URL/API_KEY/MODEL` 或 `config.local.json` |
-| 付费（预留） | Suno / Udio / ACE Studio：返回成品音频而非 SongSpec，接入点是 `jobs.py` 渲染阶段旁路 | 未来 |
+| `composer_provider=mock` | 离线算法作曲，永远可用，确定性 | 默认 |
+| `composer_provider=llm` | OpenAI 兼容作曲决策；只处理文本，不生成音频 | 显式配置 Key 后选择 |
+| `provider=local` | 本地合成器，输出 WAV / MIDI / 分轨 | 默认 |
+| `provider=diffrhythm` | 本地神经歌声，输出真人演唱音频 | 安装本地模型 |
+| `provider=mureka` | 云端成品音频，按服务商规则收费 | 用户显式选择并确认 |
 
 ## 7. API 一览
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/compose` | 创建生成任务 → `{job_id}` |
+| POST | `/api/compose` | 创建生成任务；`provider` 选择音频引擎，`composer_provider` 选择作曲方式 |
 | GET | `/api/jobs/{id}` | 轮询任务（stage: composing/arranging/rendering x%） |
 | GET | `/api/songs` | 曲库列表 |
 | GET | `/api/songs/{id}` | 曲谱（spec + 展开后的音符事件，供钢琴卷帘） |
@@ -141,17 +141,15 @@ provide(req) -> (SongSpec | None, info)
 | GET/POST | `/api/config` | 查看/设置 LLM 配置（key 脱敏返回） |
 | GET | `/api/config/meta` | 风格/情绪/默认值元数据 |
 
-## 8. 收费大模型说明与路线图
+## 8. 外部服务与费用边界
 
 **本项目默认配置即可完整使用，不花一分钱：**
 1. Mock 引擎：纯离线，无任何网络请求。
 2. GLM-4-Flash（智谱 open.bigmodel.cn）：免费模型，注册即有 API Key，
    填入配置即可让"AI 作曲决策"更强（更贴合描述的和声/歌词/结构）。
 
-**若要达到 Suno 级"带人声成品歌"**，属于付费 API（Suno 约 $8–30/月起，
-按量约 $0.05–0.5/首）。架构已预留：在 `providers/` 增加 `suno.py`
-实现 `provide()` 返回外部音频 URL，再在 `jobs.py` 把下载代替本地渲染即可，
-前端无需改动。
+LLM 只有在 `composer_provider=llm` 时调用；Mureka 只有在 `provider=mureka` 时调用。
+前端会在提交远程任务前提示数据范围和潜在费用。生成 POST 不做盲目自动重试，避免网络异常时重复创建付费任务。
 
 ## 9. v2 增补（对标 Mureka 后的迭代）
 
@@ -170,8 +168,7 @@ provide(req) -> (SongSpec | None, info)
 | AI 封面 | 前端 canvas 按 song id 哈希确定性绘制（渐变+圆环+均衡条+标题），作品缩略图与 PNG 下载共用 |
 | AI 演唱（实验） | `music/singer.py`：歌词逐字 → macOS `say`(婷婷) 合成单字（内存+磁盘双缓存 + 8 并发预热）→ FFT 测基频 → 重采样到旋律音高 → 按音符时长截断/尾音延音 → 替代器乐主旋律混入主唱声部；**`sing` 缺省视为开启**（"生成的歌要唱出歌词"是默认行为），显式传 false 或取消勾选则纯器乐；非 macOS 自动跳过 |
 
-**仍然明确的边界**：真声演唱、参考音频风格迁移、声音克隆需要
-Mureka/Suno 级付费模型，未在本项目实现；`providers/` 抽象已为其留位。
+**当前能力边界**：本地合成器是算法作曲与合成，不等同于文本到音频基础模型；本地 DiffRhythm 与云端 Mureka 输出成品音频，不提供音符级 MIDI。按 Provider 展示可用导出能力。
 
 ## 10. v3 增补（音乐质量 / 性能 / 效率三线优化）
 
@@ -242,7 +239,7 @@ _req (provider=diffrhythm)
 | 项 | 实现 |
 |---|---|
 | 强制 Token | `AI_MUSIC_HOST` 非本机回环时未设 `AI_MUSIC_TOKEN` → 拒绝启动（exit 2） |
-| 鉴权 | `/api/*` Bearer（`hmac.compare_digest`）；GET/HEAD 媒体兼容 `?token=`；静态页开放（前端从 URL 取 token 自动附加） |
+| 鉴权 | `/api/*` Bearer 或 HttpOnly 会话 Cookie（`hmac.compare_digest`）；静态页开放，浏览器入口把一次性 URL Token 换成 Cookie |
 | 传输 | 文件分块流式（1MB chunks）；Range 后缀语义修复 + 416 |
 | 输入 | JSON 1MB / 音频 25MB 上限 → 413；上传文件名白名单净化 + 服务端生成；magic bytes 校验格式 |
 | 静态防护 | `os.path.commonpath` 替换 `startswith` 前缀检查 |

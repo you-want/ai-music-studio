@@ -84,8 +84,8 @@
 ## 3. 大模型配置（免费 → 付费）
 
 > LLM 在本产品里负责两件事：**✍️ AI 写词** 和 **作曲决策**（结构/和弦/调式更贴合你的描述）。
-> 演唱、编曲、渲染始终是本地完成，LLM 只影响"创意层"。配好 Key 后引擎选"自动"即可，
-> LLM 失败会自动回落离线引擎，**永远不会因为网络问题生成失败**。
+> 只有在创作面板明确选择“远程 LLM 作曲”时才会发送描述和歌词；选择本地作曲时不会调用外部 LLM。
+> LLM 连接失败会明确显示错误，用户可以切回本地作曲。
 
 ### 3.1 首选：智谱 GLM-4.5-Flash（免费，推荐）
 
@@ -182,16 +182,12 @@ DiffRhythm/.venv-neural/bin/python backend/neural/selftest.py --mini   # 自检�
 - 常见问题：首次生成多花 1-2 分钟加载模型属正常；报"缺少权重"请核对
   `DiffRhythm/pretrained/` 下三个文件；CPU 占满风扇狂转是正常现象。
 
-### 云端 API 接入（可选，架构已预留）
+### 云端 API 接入（可选）
 
 `backend/app/providers/audio_base.py` 定义了音频成品 Provider 契约
-（`available()` + `generate()`）。接入 Mureka/Suno 只需：
-
-1. 新增 `providers/mureka.py` 实现 `AudioProvider`：把风格/歌词发出去，轮询拿回音频；
-2. 在 `jobs.py` 的 `AUDIO_PROVIDERS` 集合加入 `"mureka"`；
-3. 前端 `index.html` 引擎下拉加一项。
-
-`jobs._run_audio`、进度、取消、曲库展示全部自动复用，预计 1-2 小时工作量。
+（`available()` + `generate()`）。Mureka 已实现并接入任务流水线。前端选择 Mureka
+前会提示描述/歌词会发送到云端，并提示服务商可能按次收费；取消任务只能停止本地等待，
+是否能取消云端任务取决于服务商接口。
 
 ### 音色 Persona / 分段重唱 / 专辑（v5）
 
@@ -206,7 +202,7 @@ DiffRhythm/.venv-neural/bin/python backend/neural/selftest.py --mini   # 自检�
 ### Mureka 云 API（v5）
 
 设置 → 云 API：勾选启用并填入 [platform.mureka.ai](https://platform.mureka.ai) 的 API Key
-（约 $0.05/首，含商用授权）。引擎选「☁ Mureka」即可云端生成（1-2 分钟/首），
+（约 $0.05/首，含商用授权，以服务商最新价格和条款为准）。选择「☁ Mureka」并确认提示后才会云端生成（1-2 分钟/首），
 产物照常做歌词对齐与分轨。也可 `config.local.json` 写
 `"mureka": {"enabled": true, "api_key": "..."}` 或环境变量 `AI_MUSIC_MUREKA_KEY`。
 
@@ -225,8 +221,8 @@ AI_MUSIC_HOST=0.0.0.0 AI_MUSIC_TOKEN=你的口令 bash scripts/run.sh
 ```
 
 - **不设 Token 会被拒绝启动**（防裸奔暴露局域网）；
-- 局域网设备用 `http://<你的IP>:8766/?token=你的口令` 打开，页面会自动携带鉴权；
-- API 直连方需 `Authorization: Bearer 你的口令`（GET 下载可用 `?token=`）；
+- 局域网设备用 `http://<你的IP>:8766/?token=你的口令` 首次打开，页面会换取 HttpOnly 会话 Cookie，并从地址栏移除 Token；
+- API 直连方需 `Authorization: Bearer 你的口令`；浏览器入口会把一次性 URL Token 换成 HttpOnly 会话 Cookie，避免 Token 出现在媒体 URL 和访问日志中；
 - 明确边界：这是轻量口令而非用户体系；若要公网生产，请加反代
   （Caddy/nginx 做 TLS + 速率限制），见 `docs/BENCHMARK.md` §4。
 
@@ -254,7 +250,7 @@ AI_MUSIC_HOST=0.0.0.0 AI_MUSIC_TOKEN=你的口令 bash scripts/run.sh
 | 混响/母带 | `backend/app/music/synth.py` | `_master()` |
 | 演唱的移调极限/延音算法 | `backend/app/music/singer.py` | `render_sing_mono()` |
 
-改完跑测试：`cd backend && python3 -m unittest discover -s tests`（当前 95 个用例全绿）。
+改完跑测试：`cd backend && python3 -m unittest discover -s tests`（当前 107 个用例全绿）。
 
 ---
 
@@ -264,7 +260,7 @@ AI_MUSIC_HOST=0.0.0.0 AI_MUSIC_TOKEN=你的口令 bash scripts/run.sh
 |---|---|
 | 端口被占用 `Address already in use` | `AI_MUSIC_PORT=9000 bash scripts/run.sh` |
 | 写词显示"(模板)"而不是"(LLM)" | Key 未配置/未生效：检查 ⚙️ 设置或 `config.local.json`，重启服务 |
-| 生成报"LLM 作曲失败" | 引擎选了"大模型 LLM"但 Key 无效；改"自动"即可回落离线引擎 |
+| 生成报"LLM 作曲失败" | 远程 Key、网络或返回格式无效；检查设置后重试，或把作曲方式切回"本地离线作曲" |
 | 演唱没声音 | 非中文语音环境：`say -v '?' | grep zh_CN` 确认；没有则去系统设置下载 |
 | 第一次生成很慢 | 演唱的逐字 TTS 首次合成（约 10–20s）；之后有缓存会很快 |
 | 找不到旧作品的分轨 | v1 时代作品没有分轨；重新生成即有 |

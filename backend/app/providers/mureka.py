@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -125,7 +126,7 @@ class MurekaProvider(AudioProvider):
 
     # ------------------------------------------------------------ HTTP
     def _request(self, method, url, cfg, body=None, raw=None, content_type=None,
-                 timeout=60):
+                 timeout=60, retryable=None):
         headers = {"Authorization": "Bearer %s" % cfg["api_key"]}
         data = None
         if raw is not None:
@@ -135,21 +136,24 @@ class MurekaProvider(AudioProvider):
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
         last = None
-        for attempt in range(3):
+        if retryable is None:
+            retryable = method.upper() in ("GET", "HEAD")
+        attempts = 3 if retryable else 1
+        for attempt in range(attempts):
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 detail = e.read().decode("utf-8", "ignore")[:200]
-                if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+                if retryable and e.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
                     time.sleep(2 * (attempt + 1))
                     last = AudioProviderError("Mureka %s: %s" % (e.code, detail))
                     continue
                 raise AudioProviderError("Mureka %s: %s" % (e.code, detail))
             except (urllib.error.URLError, OSError, ValueError) as e:
                 last = AudioProviderError("Mureka 网络错误: %s" % e)
-                if attempt < 2:
+                if retryable and attempt < attempts - 1:
                     time.sleep(2)
                     continue
                 raise last
@@ -238,16 +242,37 @@ class MurekaProvider(AudioProvider):
 
         progress_cb(0.90, "下载云端音频…")
         mp3 = out_wav + ".tmp.mp3"
-        urllib.request.urlretrieve(audio_url, mp3)
+        try:
+            with urllib.request.urlopen(audio_url, timeout=300) as resp, open(mp3, "wb") as out:
+                total = 0
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 100 * 1024 * 1024:
+                        raise AudioProviderError("Mureka 音频超过 100MB，已停止下载")
+                    out.write(chunk)
+        except Exception:
+            try:
+                os.remove(mp3)
+            except OSError:
+                pass
+            raise
 
         progress_cb(0.96, "转码 WAV…")
         if not shutil.which("ffmpeg"):
             raise AudioProviderError("未安装 ffmpeg，无法转换 Mureka 音频（brew install ffmpeg）")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", mp3, "-ar", "44100", "-ac", "2",
-             "-sample_fmt", "s16", out_wav],
-            capture_output=True, timeout=300, check=True)
-        os.remove(mp3)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", mp3, "-ar", "44100", "-ac", "2",
+                 "-sample_fmt", "s16", out_wav],
+                capture_output=True, timeout=300, check=True)
+        finally:
+            try:
+                os.remove(mp3)
+            except OSError:
+                pass
         if not os.path.isfile(out_wav):
             raise AudioProviderError("Mureka 音频转码失败")
         progress_cb(1.0, "完成")

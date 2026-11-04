@@ -7,6 +7,7 @@ v5：多音频 Provider（本地 DiffRhythm 常驻 worker / 云端 Mureka）、
 音色 Persona（embedding 下发）、分段重唱（edit 旁路）、专辑批量。
 """
 import os
+import json
 import shutil
 import threading
 import time
@@ -40,6 +41,7 @@ STAGES_ZH = {
 
 MAX_RENDER_SLOTS = 2      # 本地渲染同时上限（防内存挤爆），其余排队
 MAX_NEURAL_SLOTS = 1      # 神经模型同时上限（模型占 ~10GB 内存）
+MAX_PENDING_JOBS = 32     # 防止无限创建后台线程耗尽内存
 AUDIO_PROVIDERS = {"diffrhythm", "mureka"}
 
 
@@ -60,6 +62,50 @@ class JobManager:
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(MAX_RENDER_SLOTS)
         self._neural_slot = threading.BoundedSemaphore(MAX_NEURAL_SLOTS)
+        self._job_dir = (os.path.join(self.store.lib_dir, "_jobs")
+                         if self.store is not None else None)
+        if self._job_dir:
+            os.makedirs(self._job_dir, exist_ok=True)
+            self._load_interrupted_jobs()
+
+    def _job_path(self, job_id):
+        if not self._job_dir:
+            return None
+        safe = "".join(c for c in str(job_id) if c.isalnum() or c in "-_")
+        return os.path.join(self._job_dir, safe + ".json")
+
+    def _persist(self, job):
+        """Persist lifecycle snapshots so restart behavior is explicit."""
+        if not self._job_dir:
+            return
+        try:
+            store_mod.Library._write_json(self._job_path(job["id"]), dict(job))
+        except (OSError, TypeError, ValueError):
+            # A status snapshot must never break audio generation.
+            pass
+
+    def _load_interrupted_jobs(self):
+        try:
+            names = os.listdir(self._job_dir)
+        except OSError:
+            return
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self._job_dir, name), "r", encoding="utf-8") as f:
+                    job = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(job, dict) or not job.get("id"):
+                continue
+            if job.get("status") in ("queued", "running"):
+                job.update(status="error", stage="error",
+                           stage_note="服务重启，中断任务",
+                           error="服务在任务完成前重启，任务未继续，请重新提交",
+                           interrupted=True)
+                self._persist(job)
+            self._jobs[job["id"]] = job
 
     def submit(self, req):
         job_id = uuid.uuid4().hex[:12]
@@ -67,10 +113,18 @@ class JobManager:
                "stage_note": STAGES_ZH["queued"], "progress": 0.0,
                "created_at": time.time(), "error": None, "result": None}
         with self._lock:
+            pending = sum(1 for item in self._jobs.values()
+                          if item["status"] in ("queued", "running"))
+            if pending >= MAX_PENDING_JOBS:
+                raise RuntimeError("任务队列已满（最多同时保留 %d 个未完成任务），请稍后重试"
+                                   % MAX_PENDING_JOBS)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = threading.Event()
-            if len(self._jobs) > 100:  # 只保留最近 100 个任务
-                for old in sorted(self._jobs.values(), key=lambda j: j["created_at"])[:-100]:
+            self._persist(job)
+            if len(self._jobs) > 100:  # 只清理终态任务，不能丢运行中任务
+                terminal = [item for item in self._jobs.values()
+                            if item["status"] in ("done", "error", "canceled")]
+                for old in sorted(terminal, key=lambda j: j["created_at"])[:len(self._jobs) - 100]:
                     self._jobs.pop(old["id"], None)
                     self._cancel_events.pop(old["id"], None)
         # 结果复用缓存：同参数(+seed)直接返回已有作品
@@ -82,6 +136,7 @@ class JobManager:
                        result={"song_id": hit["id"], "title": hit["title"],
                                "duration_sec": hit["duration_sec"],
                                "provider": hit.get("provider", "mock"), "cached": True})
+            self._persist(job)
             return job_id
         threading.Thread(target=self._run, args=(job, dict(req), fp), daemon=True).start()
         return job_id
@@ -100,6 +155,7 @@ class JobManager:
             if job["status"] in ("done", "error", "canceled"):
                 return dict(job)
             job["cancel_requested"] = True
+            self._persist(job)
         ev = self._cancel_events.get(job_id)
         if ev:
             ev.set()
@@ -133,13 +189,18 @@ class JobManager:
                 spec = schemas.apply_lyrics(spec, req["lyrics"])  # 进阶模式自定义歌词
 
             if req.get("provider") in AUDIO_PROVIDERS:
+                source = (info or {}).get("provider", "mock")
+                spec["composer_provider"] = "mock" if source.startswith("mock") else source
                 if (info or {}).get("provider", "").startswith("mock"):
-                    job.update(stage_note="⚠️ LLM 超时，歌词为模板兜底（重试可得更好歌词）")
+                    job.update(stage_note="离线作曲已完成，继续生成音频")
                 self._run_audio(job, req, spec, info, fp, ev)
                 return
 
             if req.get("lead_voice"):
                 spec["lead_voice"] = req["lead_voice"]
+            spec["provider"] = "local"
+            source = (info or {}).get("provider", "mock")
+            spec["composer_provider"] = "mock" if source.startswith("mock") else source
 
             # 渲染槽位：最多同时 2 首，其余排队（防止并发渲染挤爆内存）
             job.update(stage_note="等待渲染槽位…（最多同时渲染 %d 首）" % MAX_RENDER_SLOTS)
@@ -165,14 +226,16 @@ class JobManager:
                                  self.store.song_dir(song_id),
                                  progress_cb=lambda f: job.update(progress=0.08 + 0.82 * f))
                 midi.write_midi_file(song, self.store.midi_path(song_id))
-            meta = self.store.save(song_id, spec, song, fingerprint=fp)
+            meta = self.store.save(song_id, spec, song, fingerprint=fp, request=req)
             self._done(job, meta, info.get("provider", "mock"))
         except CancelledError:
             job.update(status="canceled", stage="canceled",
                        stage_note=STAGES_ZH["canceled"], progress=0.0)
+            self._persist(job)
         except Exception as e:  # 任何阶段失败都要反映到任务状态
             job.update(status="error", stage="error", stage_note=STAGES_ZH["error"],
                        error=str(e))
+            self._persist(job)
         finally:
             self._finished(job["id"])
             self._cleanup_incomplete(job)
@@ -199,6 +262,8 @@ class JobManager:
     def _run_audio(self, job, req, spec, info, fp, ev):
         """音频成品 Provider 旁路：作曲结果(歌词/结构) -> 模型/云端演唱。"""
         spec["provider"] = req.get("provider")
+        source = (info or {}).get("provider", "mock")
+        spec["composer_provider"] = "mock" if source.startswith("mock") else source
         spec["audio_only"] = True
         spec.pop("lead_voice", None)  # 音色由模型决定
         self._resolve_persona(req)
@@ -224,7 +289,7 @@ class JobManager:
                 cancel_event=ev)
             self._check_cancel(ev)
             score = self._postprocess_audio(job, req, spec, song_id, ev)
-        meta = self.store.save(song_id, spec, score, fingerprint=fp)
+        meta = self.store.save(song_id, spec, score, fingerprint=fp, request=req)
         self._done(job, meta, req.get("provider", "diffrhythm"))
 
     def _run_edit(self, job, req, fp, ev):
@@ -251,7 +316,7 @@ class JobManager:
                 cancel_event=ev)
             self._check_cancel(ev)
             score = self._postprocess_audio(job, req, spec, song_id, ev)
-        meta = self.store.save(song_id, spec, score, fingerprint=fp)
+        meta = self.store.save(song_id, spec, score, fingerprint=fp, request=req)
         self._done(job, meta, "diffrhythm-edit")
 
     def _postprocess_audio(self, job, req, spec, song_id, ev):
@@ -298,14 +363,34 @@ class JobManager:
                            "duration_sec": meta["duration_sec"],
                            "provider": meta["provider"],
                            "provider_note": provider_note})
+        self._persist(job)
 
     def _compose(self, req):
         """按 provider 选择：auto = LLM(启用时) 优先、失败回落 mock；
         显式选 llm 但没配置 / 失败则直接报错（不静默降级）。
         音频类引擎（diffrhythm/mureka）复用 auto 逻辑做作曲，渲染阶段另行旁路。"""
-        mode = req.get("provider") or "auto"
+        mode = req.get("provider") or "local"
+        explicit_composer = req.get("composer_provider")
         cfg = self._get_config()
         llm_cfg = cfg.get("llm", {})
+        if explicit_composer == "mock":
+            spec = mock_composer.compose(req)
+            spec["provider"] = "mock"
+            spec["composer_provider"] = "mock"
+            return spec, {"provider": "mock"}
+        if explicit_composer == "llm":
+            if not llm_cfg.get("enabled"):
+                raise RuntimeError("LLM 未启用：请在右上角「引擎设置」里配置 API Key，或选择离线作曲")
+            spec, info = llm_provider.provide(req, cfg)
+            if spec is None:
+                raise RuntimeError("LLM 作曲失败: %s" % info.get("reason", "未知"))
+            spec["composer_provider"] = "llm"
+            return spec, info
+        if mode == "local":
+            spec = mock_composer.compose(req)
+            spec["provider"] = "mock"
+            spec["composer_provider"] = "mock"
+            return spec, {"provider": "mock"}
         if mode == "llm":
             if not llm_cfg.get("enabled"):
                 raise RuntimeError("LLM 未启用：请在右上角「引擎设置」里配置 API Key，"

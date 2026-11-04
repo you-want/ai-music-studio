@@ -3,11 +3,12 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 import uuid
 
 _FP_KEYS = ("description", "genre", "mood", "bpm", "duration_sec", "key", "mode",
-            "provider", "seed", "lyrics", "lead_voice", "sing", "ref_audio",
+            "provider", "composer_provider", "seed", "lyrics", "lead_voice", "sing", "ref_audio",
             "full_song", "lyrics_req", "persona_id")
 
 
@@ -49,7 +50,7 @@ class Library:
     def prepare(self, song_id):
         os.makedirs(self.song_dir(song_id), exist_ok=True)
 
-    def save(self, song_id, spec, score, fingerprint=None):
+    def save(self, song_id, spec, score, fingerprint=None, request=None):
         d = self.song_dir(song_id)
         os.makedirs(d, exist_ok=True)
         meta = {
@@ -61,6 +62,7 @@ class Library:
             "duration_sec": score["duration_sec"],
             "total_bars": sum(s["bars"] for s in spec["structure"]),
             "provider": spec.get("provider", "mock"),
+            "composer_provider": spec.get("composer_provider", "mock"),
             "audio_only": bool(spec.get("audio_only")),
             "lyrics_source": spec.get("lyrics_source", ""),
             "sing": bool(spec.get("sing")),
@@ -69,6 +71,15 @@ class Library:
             "created_at": int(time.time()),
             "sections": [{"name": s["name"], "bars": s["bars"]} for s in spec["structure"]],
         }
+        if request:
+            # Persist only normalized, non-secret request fields. Runtime paths
+            # and provider internals must never become part of library metadata.
+            allowed = ("description", "genre", "mood", "bpm", "duration_sec", "key",
+                       "mode", "provider", "title", "seed", "lyrics", "lead_voice",
+                       "composer_provider", "sing", "ref_audio", "full_song", "lyrics_req",
+                       "persona_id")
+            meta["request"] = {k: request[k] for k in allowed
+                                if k in request and request[k] is not None}
         self._write_json(os.path.join(d, "meta.json"), meta)
         self._write_json(os.path.join(d, "song.json"), spec)
         self._write_json(os.path.join(d, "score.json"), score)
@@ -76,8 +87,19 @@ class Library:
 
     @staticmethod
     def _write_json(path, data):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+        directory = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def _read_json(path):

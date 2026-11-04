@@ -11,7 +11,12 @@ from .music import theory
 GENRES = ["pop", "rock", "electronic", "ballad", "folk", "guofeng", "lofi", "jazz", "rap"]
 MOODS = ["happy", "sad", "chill", "energetic", "romantic", "epic"]
 SECTION_NAMES = ["intro", "verse", "prechorus", "chorus", "bridge", "outro"]
-PROVIDERS = ["auto", "mock", "llm", "diffrhythm"]  # diffrhythm = 神经歌声（音频成品类）
+# `mureka` is an audio-output provider just like the local DiffRhythm engine.
+# Keep it in the request allow-list so the UI selection cannot silently fall
+# back to `auto` (which could invoke a different engine and incur a different
+# cost/privacy profile).
+PROVIDERS = ["local", "auto", "mock", "llm", "diffrhythm", "mureka"]
+COMPOSER_PROVIDERS = ["mock", "llm"]
 MODES = list(theory.SCALES.keys())
 
 LEAD_VOICES = ["synth_lead", "square_lead", "piano", "pluck", "keys", "vocal_hum"]
@@ -44,6 +49,10 @@ class SpecError(ValueError):
     """SongSpec 无法修复时抛出。"""
 
 
+class RequestError(ValueError):
+    """Compose request contains an unsupported explicit engine selection."""
+
+
 def _as_int(v, default=None):
     try:
         return int(round(float(v)))
@@ -63,8 +72,16 @@ def bars_for_duration(duration_sec, bpm, beats_per_bar=4):
 
 
 def parse_request(raw):
-    """把 /api/compose 请求体规范化；非法值尽量纠正而不是报错。"""
+    """Normalize compose fields and reject unknown engines explicitly."""
     raw = raw or {}
+    provider = raw.get("provider") or "local"
+    if provider not in PROVIDERS:
+        raise RequestError("不支持的音频引擎：%s" % provider)
+    composer_provider = raw.get("composer_provider")
+    if composer_provider is not None and composer_provider not in COMPOSER_PROVIDERS:
+        raise RequestError("不支持的作曲方式：%s" % composer_provider)
+    if composer_provider is None and provider in ("local", "diffrhythm", "mureka"):
+        composer_provider = "mock"
     req = {
         "description": str(raw.get("description") or "").strip(),
         "genre": raw.get("genre") if raw.get("genre") in GENRES else "auto",
@@ -73,7 +90,10 @@ def parse_request(raw):
         "duration_sec": _clamp(float(_as_int(raw.get("duration_sec"), 0) or 0) or DEFAULTS["duration_sec"], 10.0, 180.0),
         "key": None,
         "mode": raw.get("mode") if raw.get("mode") in MODES else None,
-        "provider": raw.get("provider") if raw.get("provider") in PROVIDERS else "auto",
+        "provider": provider,
+        # New clients choose composition and audio generation independently.
+        # Missing this field preserves the legacy provider behavior.
+        "composer_provider": composer_provider,
         "title": str(raw.get("title") or "").strip() or None,
         "seed": _as_int(raw.get("seed")),
         "lyrics": str(raw.get("lyrics") or "").strip() or None,

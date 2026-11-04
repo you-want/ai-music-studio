@@ -5,8 +5,8 @@
 
 const $ = (id) => document.getElementById(id);
 
-/* 局域网 Token 模式：页面以 /?token=xxx 打开，所有 API 请求自动带上鉴权 */
-const URL_TOKEN = new URLSearchParams(location.search).get("token") || "";
+/* 局域网 Token 模式：首次打开 /?token=xxx 时换取 HttpOnly 会话 Cookie。 */
+let URL_TOKEN = new URLSearchParams(location.search).get("token") || "";
 function api(path, opts) {
   opts = opts || {};
   const headers = Object.assign({}, opts.headers || {});
@@ -14,8 +14,18 @@ function api(path, opts) {
   return fetch(path, Object.assign({}, opts, { headers: headers }));
 }
 function mediaUrl(path) {
-  if (!URL_TOKEN) return path;
-  return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(URL_TOKEN);
+  return path;
+}
+
+async function establishSession() {
+  if (!URL_TOKEN) return;
+  const response = await fetch("/api/session", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + URL_TOKEN },
+  });
+  if (!response.ok) throw new Error("访问 Token 无效");
+  history.replaceState(null, "", location.pathname + location.hash);
+  URL_TOKEN = "";
 }
 
 const state = {
@@ -24,6 +34,7 @@ const state = {
   selectedMood: "auto",
   mode: "simple",
   currentSongId: null,
+  currentParams: null,
   score: null,
   pxb: 12,
   bpm: 100,
@@ -34,11 +45,16 @@ const state = {
   refAudio: null,     // 已上传参考音频文件名（神经引擎风格迁移）
   activeJobIds: [],   // 进行中的任务（供取消）
   jobStartedAt: 0,
+  candidateSongIds: [],
+  pollFailures: 0,
 };
+
+const ACTIVE_JOBS_KEY = "songweaver.activeJobs";
 
 /* ================= 初始化 ================= */
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
+  try { await establishSession(); } catch (e) { console.error(e); }
   await loadMeta();
   await loadPersonas();
   await refreshConfigBadge();
@@ -47,7 +63,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 async function loadMeta() {
   try {
-    state.meta = await (await api("/api/meta")).json();
+    const resp = await api("/api/meta");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    state.meta = await resp.json();
   } catch (e) {
     console.error("meta 加载失败", e);
     return;
@@ -91,15 +109,20 @@ async function loadMeta() {
 }
 
 const PROVIDER_BADGE = {
-  mock: "🧩 离线引擎",
-  llm: "🤖 大模型作曲",
+  local: "🎹 本地合成器",
+  mock: "🎹 本地合成器",
   diffrhythm: "🧠 神经歌声·真人演唱",
+  mureka: "☁️ Mureka 云端演唱",
 };
 function providerBadge(provider) {
   return PROVIDER_BADGE[provider] || "🧩 离线引擎";
 }
 function providerIcon(provider) {
-  return { mock: "🧩", llm: "🤖", diffrhythm: "🧠" }[provider] || "🧩";
+  return { local: "🎹", mock: "🎹", diffrhythm: "🧠", mureka: "☁️" }[provider] || "🎹";
+}
+
+function composerLabel(provider) {
+  return provider === "llm" ? "LLM 作曲" : "本地作曲";
 }
 
 function fillSelect(sel, items) {
@@ -115,7 +138,8 @@ function fillSelect(sel, items) {
 function buildChips(container, items, activeId, onPick) {
   container.innerHTML = "";
   items.forEach((it) => {
-    const el = document.createElement("span");
+    const el = document.createElement("button");
+    el.type = "button";
     el.className = "chip" + (it.id === activeId ? " active" : "");
     el.textContent = it.label;
     el.onclick = () => {
@@ -136,6 +160,7 @@ function collectParams() {
     duration_sec: parseInt($("duration").value, 10),
     bpm: parseInt($("bpm").value, 10) || null,
     provider: $("provider").value,
+    composer_provider: $("composer-provider").value,
   };
   if (state.mode === "advanced") {
     p.title = $("title").value.trim() || null;
@@ -155,12 +180,23 @@ function collectParams() {
 }
 
 /* ================= 生成流程 ================= */
-async function generate(overrides) {
-  const params = Object.assign(collectParams(), overrides || {});
+async function generate(overrides, sourceParams) {
+  const params = Object.assign({}, sourceParams || collectParams(), overrides || {});
   if (!params.description && !params.lyrics && params.genre === "auto") {
     params.description = "一段随机的心情小曲";
   }
   state.lastParams = params;
+  if (params.provider === "mureka") {
+    const tracks = state.mode === "advanced" && $("dual").checked && !overrides ? 2 : 1;
+    const composerNote = params.composer_provider === "llm"
+      ? "，并发送到你配置的 LLM 服务商生成作曲设计" : "";
+    if (!confirm("将把创作描述和歌词发送给 Mureka 云端生成" + (tracks > 1 ? " 2 首作品" : "作品")
+      + composerNote + "。服务商可能按次收费，费用以其实际计费为准。继续吗？")) return;
+  } else if (params.composer_provider === "llm") {
+    if (!confirm("将把创作描述和歌词发送到你配置的 LLM 服务商用于作曲。继续吗？")) return;
+  }
+  $("candidate-switch").classList.add("hidden");
+  state.candidateSongIds = [];
   const btn = $("btn-generate");
   btn.disabled = true;
   showJob(true, "提交任务…", 0);
@@ -191,7 +227,9 @@ async function generate(overrides) {
       ids.push(data.job_id);
     }
     state.activeJobIds = ids;
+    sessionStorage.setItem(ACTIVE_JOBS_KEY, JSON.stringify(ids));
     state.jobStartedAt = Date.now();
+    state.pollFailures = 0;
     $("btn-job-cancel").classList.remove("hidden");
     pollJobs(ids);
   } catch (e) {
@@ -209,8 +247,8 @@ async function cancelJob() {
 }
 
 function pollJobs(jobIds) {
-  clearInterval(state.pollTimer);
-  state.pollTimer = setInterval(async () => {
+  clearTimeout(state.pollTimer);
+  const poll = async () => {
     try {
       const jobs = [];
       for (const id of jobIds) {
@@ -237,34 +275,64 @@ function pollJobs(jobIds) {
       showJob(true, stage, avg);
 
       if (canceled.length === jobs.length) {
-        clearInterval(state.pollTimer);
+        clearTimeout(state.pollTimer);
         state.activeJobIds = [];
         $("btn-job-cancel").classList.add("hidden");
         $("btn-generate").disabled = false;
         showJob(false);
+        sessionStorage.removeItem(ACTIVE_JOBS_KEY);
       } else if (done.length === jobs.length) {
-        clearInterval(state.pollTimer);
+        clearTimeout(state.pollTimer);
         state.activeJobIds = [];
         $("btn-job-cancel").classList.add("hidden");
         $("btn-generate").disabled = false;
         setTimeout(() => showJob(false), 1200);
-        await loadSong(done[0].result.song_id, true);
-        await refreshLibrary();
+        state.candidateSongIds = done.map((j) => j.result.song_id);
         if (done.length > 1) {
-          setTimeout(() => showJob(true, "✅ 两个候选版本都已生成，另一个在「作品目录」里", 100), 1400);
-          setTimeout(() => showJob(false), 5200);
+          $("candidate-switch").classList.remove("hidden");
+          const selectCandidate = async (index) => {
+            [$("candidate-a"), $("candidate-b")].forEach((button, i) => {
+              button.classList.toggle("active", i === index);
+              button.setAttribute("aria-pressed", i === index ? "true" : "false");
+            });
+            try { await loadSong(state.candidateSongIds[index], false); }
+            catch (e) { alert("候选作品加载失败：" + e.message); }
+          };
+          $("candidate-a").onclick = () => selectCandidate(0);
+          $("candidate-b").onclick = () => selectCandidate(1);
+          $("candidate-a").classList.add("active");
+          $("candidate-a").setAttribute("aria-pressed", "true");
+          $("candidate-b").classList.remove("active");
+          $("candidate-b").setAttribute("aria-pressed", "false");
         }
+        try { await loadSong(done[0].result.song_id, true); }
+        catch (e) { showJob(true, "作品已生成，但加载失败：" + e.message, 100); }
+        await refreshLibrary();
+        sessionStorage.removeItem(ACTIVE_JOBS_KEY);
       } else if ((failed.length || canceled.length) && !running.length) {
-        clearInterval(state.pollTimer);
+        clearTimeout(state.pollTimer);
         state.activeJobIds = [];
         $("btn-job-cancel").classList.add("hidden");
         $("btn-generate").disabled = false;
         if (failed.length) showJob(true, "❌ " + (failed[0].error || "生成失败"), 100);
-        if (done.length) await loadSong(done[0].result.song_id, true);
+        if (done.length) {
+          try { await loadSong(done[0].result.song_id, true); }
+          catch (e) { showJob(true, "作品已生成，但加载失败：" + e.message, 100); }
+        }
         setTimeout(() => { showJob(false); $("btn-generate").disabled = false; }, 4200);
+        sessionStorage.removeItem(ACTIVE_JOBS_KEY);
       }
-    } catch (e) { console.error(e); }
-  }, 700);
+      state.pollFailures = 0;
+      if (state.activeJobIds.length) state.pollTimer = setTimeout(poll, 1400);
+    } catch (e) {
+      state.pollFailures += 1;
+      const delay = Math.min(10000, 1000 * (2 ** Math.min(state.pollFailures, 3)));
+      showJob(true, "连接中断，正在重连（" + e.message + "）", 0);
+      state.pollTimer = setTimeout(poll, delay);
+    }
+  };
+  state.activeJobIds = jobIds;
+  poll();
 }
 
 function showJob(show, text, pct) {
@@ -350,15 +418,21 @@ function makeCover(id, title, size) {
 
 /* ================= 加载歌曲 ================= */
 async function loadSong(songId, autoplay) {
-  const data = await (await api("/api/songs/" + songId)).json();
+  const resp = await api("/api/songs/" + songId);
+  if (!resp.ok) throw new Error("作品加载失败（HTTP " + resp.status + "）");
+  const data = await resp.json();
   if (!data.meta) return;
   state.currentSongId = songId;
+  state.currentParams = data.meta.request || null;
+  if (state.currentParams) state.lastParams = Object.assign({}, state.currentParams);
   state.score = data.score;
   state.bpm = data.score.bpm || 100;
   const audioOnly = !!data.meta.audio_only
     || !(data.score && data.score.melody && data.score.melody.length);
 
   $("player-panel").classList.remove("hidden");
+  const main = document.querySelector("main");
+  if (main) main.classList.add("has-player");
   $("song-title").textContent = data.meta.title;
   $("song-tags").innerHTML = [
     labelOf("genres", data.meta.genre),
@@ -367,6 +441,7 @@ async function loadSong(songId, autoplay) {
     data.meta.bpm + " BPM",
     fmtTime(data.meta.duration_sec),
     providerBadge(data.meta.provider),
+    composerLabel(data.meta.composer_provider),
     data.spec.lyrics_source === "custom" ? "📝 自定义歌词" : "",
     audioOnly ? "🎤 真声演唱" : (data.spec.sing ? "🎤 AI 演唱" : ""),
   ].filter(Boolean).map((t, i) => `<span class="tag ${["", "cyan", "gold", "", "", "cyan", "", "gold"][i]}">${t}</span>`).join("");
@@ -607,6 +682,7 @@ function bindPlayer() {
   audio.ontimeupdate = () => {
     const dur = audio.duration || (state.score ? state.score.duration_sec : 1);
     $("seek-fill").style.width = (audio.currentTime / dur * 100) + "%";
+    $("seek").setAttribute("aria-valuenow", String(Math.round(audio.currentTime / dur * 100)));
     $("time-label").textContent = fmtTime(audio.currentTime) + " / " + fmtTime(dur);
     const beat = audio.currentTime * state.bpm / 60;
     $("playhead").style.transform = "translateX(" + (beat * state.pxb) + "px)";
@@ -619,6 +695,15 @@ function bindPlayer() {
     const ratio = (e.clientX - rect.left) / rect.width;
     const dur = audio.duration || (state.score ? state.score.duration_sec : 0);
     if (dur) audio.currentTime = ratio * dur;
+  };
+  $("seek").onkeydown = (e) => {
+    const dur = audio.duration || (state.score ? state.score.duration_sec : 0);
+    if (!dur) return;
+    const steps = { ArrowLeft: -5, ArrowDown: -5, ArrowRight: 5, ArrowUp: 5,
+      PageDown: -15, PageUp: 15, Home: -dur, End: dur };
+    if (!(e.key in steps)) return;
+    e.preventDefault();
+    audio.currentTime = Math.max(0, Math.min(dur, audio.currentTime + steps[e.key]));
   };
   $("roll-wrap").onclick = (e) => {
     if (e.target.id !== "roll") return;
@@ -810,7 +895,9 @@ async function mvExport() {
 
 /* ================= 曲库 ================= */
 async function refreshLibrary() {
-  const data = await (await api("/api/songs")).json();
+  const resp = await api("/api/songs");
+  if (!resp.ok) throw new Error("作品库加载失败（HTTP " + resp.status + "）");
+  const data = await resp.json();
   state.songs = data.songs;
   renderLibrary();
 }
@@ -844,11 +931,12 @@ function renderLibrary() {
           <span>${song.bpm} BPM</span>
           <span>${fmtTime(song.duration_sec)}</span>
           <span>${providerIcon(song.provider)}</span>
+          <span>${composerLabel(song.composer_provider)}</span>
           <span>${song.sing ? "🎤" : ""}</span>
           <span>${when.getMonth() + 1}/${when.getDate()} ${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}</span>
         </div>
       </div>
-      <span class="del" title="删除">✕</span>`;
+      <button class="del" type="button" title="删除作品" aria-label="删除《${escapeHtml(song.title)}》">✕</button>`;
     item.onclick = () => loadSong(song.id, true);
     item.querySelector(".del").onclick = async (e) => {
       e.stopPropagation();
@@ -857,6 +945,8 @@ function renderLibrary() {
       if (state.currentSongId === song.id) {
         $("audio").pause();
         $("player-panel").classList.add("hidden");
+        const main = document.querySelector("main");
+        if (main) main.classList.remove("has-player");
         state.currentSongId = null;
       }
       refreshLibrary();
@@ -1015,7 +1105,19 @@ async function createAlbum() {
 
 /* ================= 设置 ================= */
 async function openSettings() {
-  const cfg = await (await api("/api/config")).json();
+  let resp;
+  try { resp = await api("/api/config"); }
+  catch (e) {
+    $("cfg-status").textContent = "读取配置失败：" + e.message;
+    $("settings-modal").classList.remove("hidden");
+    return;
+  }
+  if (!resp.ok) {
+    $("cfg-status").textContent = "读取配置失败（HTTP " + resp.status + "）";
+    $("settings-modal").classList.remove("hidden");
+    return;
+  }
+  const cfg = await resp.json();
   $("cfg-enabled").checked = !!cfg.llm.enabled;
   $("cfg-base-url").value = cfg.llm.base_url || "";
   $("cfg-model").value = cfg.llm.model || "";
@@ -1028,18 +1130,15 @@ async function openSettings() {
   $("cfg-neural-status").textContent = neural.available
     ? "✅ " + (neural.reason || "就绪") + " · 采样步数 " + neural.steps
     : "❌ " + (neural.reason || "未安装（bash scripts/setup_neural.sh）");
-  try {
-    const cfg = await (await api("/api/config")).json();
-    const mk = cfg.mureka || {};
-    $("cfg-mureka-enabled").checked = !!mk.enabled;
-    $("cfg-mureka-model").value = mk.model || "mureka-6";
-    $("cfg-mureka-key").value = "";
-    $("cfg-mureka-key").placeholder = mk.api_key_set
-      ? ("已保存: " + mk.api_key_masked) : "粘贴 API Key";
-    $("cfg-steps").value = (cfg.neural && cfg.neural.steps) || 16;
-    $("cfg-steps-val").textContent = $("cfg-steps").value;
-    $("cfg-mureka-status").textContent = "";
-  } catch (e) { /* 忽略 */ }
+  const mk = cfg.mureka || {};
+  $("cfg-mureka-enabled").checked = !!mk.enabled;
+  $("cfg-mureka-model").value = mk.model || "mureka-6";
+  $("cfg-mureka-key").value = "";
+  $("cfg-mureka-key").placeholder = mk.api_key_set
+    ? ("已保存: " + mk.api_key_masked) : "粘贴 API Key";
+  $("cfg-steps").value = (cfg.neural && cfg.neural.steps) || 16;
+  $("cfg-steps-val").textContent = $("cfg-steps").value;
+  $("cfg-mureka-status").textContent = "";
   $("settings-modal").classList.remove("hidden");
 }
 
@@ -1099,24 +1198,37 @@ async function saveSettings() {
   };
   const mkey = $("cfg-mureka-key").value.trim();
   if (mkey) body.mureka.api_key = mkey;
-  const resp = await api("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const cfg = await resp.json();
-  const mkOk = cfg.mureka && cfg.mureka.enabled;
-  $("cfg-mureka-status").textContent = mkOk ? "✅ Mureka 云引擎已启用" : "Mureka 未启用";
-  $("cfg-status").textContent = "✅ 已保存（来源: " + cfg.source + "）";
-  await refreshConfigBadge();
-  await loadMeta();
-  setTimeout(() => $("settings-modal").classList.add("hidden"), 900);
+  try {
+    const resp = await api("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const cfg = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      $("cfg-status").textContent = "保存失败：" + (cfg.error || resp.statusText);
+      return;
+    }
+    const mkOk = cfg.mureka && cfg.mureka.enabled;
+    $("cfg-mureka-status").textContent = mkOk ? "✅ Mureka 云引擎已启用" : "Mureka 未启用";
+    $("cfg-status").textContent = "✅ 已保存（来源: " + cfg.source + "）";
+    await refreshConfigBadge();
+    await loadMeta();
+    setTimeout(() => $("settings-modal").classList.add("hidden"), 900);
+  } catch (e) {
+    $("cfg-status").textContent = "保存失败：" + e.message;
+  }
 }
 
 async function refreshConfigBadge() {
   try {
     const cfg = await (await api("/api/config")).json();
     const badge = $("llm-badge");
+    const composer = $("composer-provider");
+    const option = composer && composer.querySelector('option[value="llm"]');
+    if (!badge || !option) return;
+    option.disabled = !cfg.llm.enabled;
+    option.title = cfg.llm.enabled ? "使用已配置的远程 LLM" : "请先在引擎设置中配置并启用 LLM";
     if (cfg.llm.enabled) {
       badge.textContent = "LLM: " + cfg.llm.model + " ✓";
       badge.classList.add("on");
@@ -1178,6 +1290,8 @@ function setMode(mode) {
   const adv = mode === "advanced";
   $("tab-simple").classList.toggle("active", !adv);
   $("tab-advanced").classList.toggle("active", adv);
+  $("tab-simple").setAttribute("aria-selected", String(!adv));
+  $("tab-advanced").setAttribute("aria-selected", String(adv));
   $("panel-simple").classList.toggle("hidden", adv);
   $("panel-adv-req").classList.toggle("hidden", !adv);
   $("panel-adv-lyrics").classList.toggle("hidden", !adv);
@@ -1197,13 +1311,13 @@ function bindEvents() {
   $("duration").oninput = (e) => { $("dur-val").textContent = e.target.value + "s"; };
   $("bpm").oninput = (e) => { $("bpm-val").textContent = +e.target.value === 0 ? "自动" : e.target.value; };
 
-  $("btn-remix").onclick = () => generate({ seed: Date.now() % 1e9 });
+  $("btn-remix").onclick = () => generate({ seed: Date.now() % 1e9 }, state.currentParams);
   $("btn-extend").onclick = () => {
-    const base = state.lastParams || collectParams();
+    const base = state.currentParams || state.lastParams || collectParams();
     generate({
       seed: base.seed !== undefined && base.seed !== null ? base.seed : undefined,
       duration_sec: Math.min(180, (base.duration_sec || 30) + 30),
-    });
+    }, base);
   };
   $("btn-fav").onclick = toggleFav;
   $("btn-rename").onclick = renameSong;
@@ -1233,8 +1347,24 @@ function bindEvents() {
   $("provider").onchange = onProviderChange;
   $("btn-ref-upload").onclick = uploadRefAudio;
   onProviderChange();
+  $("candidate-a").onclick = () => loadSong(state.candidateSongIds[0], false);
+  $("candidate-b").onclick = () => loadSong(state.candidateSongIds[1], false);
   $("settings-modal").onclick = (e) => {
     if (e.target.id === "settings-modal") $("settings-modal").classList.add("hidden");
   };
+  const savedJobs = sessionStorage.getItem(ACTIVE_JOBS_KEY);
+  if (savedJobs) {
+    try {
+      const ids = JSON.parse(savedJobs);
+      if (Array.isArray(ids) && ids.length) {
+        state.activeJobIds = ids;
+        $("btn-generate").disabled = true;
+        $("btn-job-cancel").classList.remove("hidden");
+        pollJobs(ids);
+      }
+    } catch (e) {
+      sessionStorage.removeItem(ACTIVE_JOBS_KEY);
+    }
+  }
   window.addEventListener("resize", () => { if (state.score) drawRoll(); });
 }

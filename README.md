@@ -1,6 +1,6 @@
 # 🎵 织歌 SongWeaver（AI Music Studio）
 
-**一句话，织一首歌。** 完全本地运行的 AI 音乐创作程序：
+**一句话，织一首歌。** 本地优先的 AI 音乐创作程序：
 AI 决定调性、和声、曲式、歌词，本地编曲引擎展开成旋律/贝斯/和声/鼓组，
 再用内置合成器渲染成 **44.1kHz 立体声 WAV**，同时导出 **标准 MIDI** 和 **4 条分轨**。
 
@@ -59,9 +59,9 @@ outro 渐出）、人声侧链避让（唱时伴奏自动让位）、总线 EQ +
 同参数结果缓存秒回、演唱单字 TTS 磁盘缓存 + 启动后台预热。
 
 **双引擎作曲 + 神经演唱（v4 四引擎）**：
-- 🧩 **离线 Mock**：算法作曲，确定性可复现（同 seed 同曲），永远可用；
+- 🧩 **离线 Mock**：算法作曲，确定性可复现（同 seed 同曲），永远可用；默认不会把文本发到外部服务；
 - 🤖 **大模型 LLM**：免费 GLM-4-Flash 做作曲决策与写词（更贴合描述），
-  输出经严格校验修复，失败自动回落 Mock，永不中断；
+  输出经严格校验修复；远程调用失败会明确提示，用户可切回本地作曲；
 - 🧠 **神经歌声 DiffRhythm**（v4）：`bash scripts/setup_neural.sh` 一键安装。
   作曲决策仍由 LLM/Mock 完成歌词与结构，再交给开源 DiffRhythm（Apache-2.0，1.07B）
   本地推理出**真人声演唱**；支持上传 ≥10s 参考音频做风格迁移；95 秒/首
@@ -69,7 +69,7 @@ outro 渐出）、人声侧链避让（唱时伴奏自动让位）、总线 EQ +
   生成后自动两步后处理：**Whisper 强制对齐**（每句歌词真实起止时间，卡拉OK跟嘴型）
   + **Demucs 源分离**（人声/鼓/贝斯/伴奏 4 分轨，神经歌曲也能进 DAW）。
   神经作品可下载 WAV/分轨、导出 MV 与分享包（无 MIDI/换副歌——模型不产出音符级曲谱）；
-- ☁️ **Mureka 云 API（v5 已接入）**：设置里填 Key 即可用官方云端引擎
+- ☁️ **Mureka 云 API（v5 已接入）**：设置里填 Key 后，必须在创作面板明确选择云端引擎并确认后才调用
   （约 $0.05/首、含商用授权、1-2 分钟出歌），产物照常走本地对齐与分轨；
   `providers/audio_base.py` 抽象保持开放（Suno 第三方代理因合规风险不接入）。
 
@@ -171,8 +171,8 @@ ai-music-studio/
 | GET/POST | `/api/config` | 查看/设置 LLM 配置（Key 脱敏） |
 | GET | `/api/meta` · `/api/health` | 风格/情绪元数据（含引擎可用性）· 健康检查 |
 
-设置 `AI_MUSIC_TOKEN` 后所有 `/api/*` 需携带 `Authorization: Bearer <token>`
-（GET 下载类额外接受 `?token=`）。
+设置 `AI_MUSIC_TOKEN` 后所有 `/api/*` 需携带 `Authorization: Bearer <token>`。
+浏览器通过 `/?token=你的口令` 首次打开时会换取 HttpOnly 会话 Cookie，随后媒体和 API 请求都不再把 Token 放进 URL。
 
 ## 许可证与致谢
 
@@ -184,13 +184,12 @@ ai-music-studio/
 ## 测试
 
 ```bash
-cd backend && python3 -m unittest discover -s tests   # 103 个用例
+cd backend && python3 -m unittest discover -s tests   # 107 个用例
 ```
 
 ## 关于收费模型（现阶段的取舍）
 
-- **现在**：Mock 引擎 + 免费大模型已覆盖完整闭环，不花一分钱。
+- **现在**：本地 Mock 引擎覆盖完整闭环，不花一分钱；LLM 只有显式选择后才调用。
 - **想要"带人声演唱的成品歌"**（Suno 级别）属于付费 API
   （Suno/Udio 约 $8–30/月，按量约 $0.05–0.5/首）。
-  架构已预留：`providers/` 里加一个 `suno.py`，`jobs.py` 渲染阶段改为下载
-  外部音频即可，前端零改动。详见 `docs/DESIGN.md` §8。
+  其他云端音频 Provider 可复用 `providers/audio_base.py` 接入，详见 `docs/DESIGN.md` §8。

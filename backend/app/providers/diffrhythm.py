@@ -17,6 +17,7 @@ torch CPU）里进行，本模块只负责编排：探测可用性、拼装任�
     neural.align / neural.separate                true/false 开关后处理
 """
 import json
+import atexit
 import os
 import queue
 import shutil
@@ -339,13 +340,11 @@ class NeuralWorker:
             if msg.get("type") == "ready":
                 return
             if msg.get("type") == "error":
-                self._proc = None
+                self._kill()
                 raise AudioProviderError("神经 worker 启动失败: %s" % msg.get("error"))
             if time.time() > deadline:
                 break
-        if proc.poll() is None:
-            proc.kill()
-        self._proc = None
+        self._kill()
         raise AudioProviderError("神经 worker 启动超时（详情见 %s）" % self._log_path())
 
     def _ensure(self):
@@ -354,12 +353,33 @@ class NeuralWorker:
         self._spawn()
 
     def _kill(self):
-        if self._proc is not None:
+        proc = self._proc
+        if proc is not None:
             try:
-                self._proc.kill()
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=5)
             except OSError:
                 pass
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            for stream in (proc.stdin, proc.stdout):
+                try:
+                    if stream:
+                        stream.close()
+                except OSError:
+                    pass
         self._proc = None
+        if self._log_fh:
+            try:
+                self._log_fh.close()
+            except OSError:
+                pass
+            self._log_fh = None
 
     def run_job(self, job, timeout_min, progress_cb=None, cancel_event=None):
         progress_cb = progress_cb or (lambda frac, note: None)
@@ -440,6 +460,7 @@ class NeuralWorker:
 
 # 模块级单例：全进程共用一个常驻 worker（模型 ~10GB 只加载一次）
 _WORKER = NeuralWorker()
+atexit.register(_WORKER._kill)
 
 # ------------------------------------------------------------ 后处理（模块级，jobs 直接调用）
 def _run_subprocess_job(script, job, timeout_min, config_path=None, progress_cb=None,
@@ -498,6 +519,10 @@ def _run_subprocess_job(script, job, timeout_min, config_path=None, progress_cb=
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        try:
+            proc.stdout.close()
+        except (OSError, AttributeError):
+            pass
     if cancel_event is not None and cancel_event.is_set():
         raise CancelledError("已取消")
     if error:

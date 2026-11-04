@@ -2,7 +2,7 @@
 
 默认对接智谱 GLM-4-Flash（免费模型），也支持 DeepSeek / OpenAI / 本地 Ollama
 等任何 OpenAI 兼容端点。LLM 只产出高层 SongSpec（结构/和弦/歌词/速度/调式），
-音符级展开仍由本地编曲器完成 —— 输出不合规时自动回落 Mock。
+音符级展开仍由本地编曲器完成 —— 输出不合规时返回可读错误，由上层决定是否切回本地作曲。
 
 配置优先级：环境变量 AI_MUSIC_LLM_* > config.local.json > 默认值。
 """
@@ -10,6 +10,7 @@ import json
 import os
 import re
 import ssl
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -135,8 +136,19 @@ def save_config(config_path, llm_cfg):
         except (OSError, ValueError):
             existing = {}
     existing["llm"] = clean
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(existing, f, ensure_ascii=False, indent=2)
+    directory = os.path.dirname(config_path) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, config_path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
     clean["enabled"] = bool(clean["enabled"] and clean["api_key"] and clean["model"])
     return {"llm": clean, "source": "config.local.json"}
 
