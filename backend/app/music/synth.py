@@ -169,6 +169,19 @@ def _add(bufL, bufR, sig, start_sec, pan):
 
 
 # ---------------------------------------------------------------- 鼓组合成
+def _lowpass(sig, hz, taps=48, poles=1):
+    """一阶/多阶低通的 FIR 近似（指数核级联）：白噪声打击乐若无低通会直窜
+    奈奎斯特，>16kHz 的大量刺耳能量听感"沙沙"发毛；hat 用二阶 9kHz 后
+    >16k 能量大幅下降，同时保留瞬态"哒"感。"""
+    out = sig.astype(np.float32)
+    a = 1.0 - math.exp(-2.0 * math.pi * hz / RATE)
+    k = (a * (1.0 - a) ** np.arange(taps)).astype(np.float32)
+    k /= k.sum()
+    for _ in range(max(1, poles)):
+        out = np.convolve(out, k, mode="same").astype(np.float32)
+    return out
+
+
 def _kick():
     n = int(0.30 * RATE)
     t = np.arange(n) / RATE
@@ -180,7 +193,7 @@ def _kick():
 def _snare():
     n = int(0.25 * RATE)
     t = np.arange(n) / RATE
-    noise = np.diff(np.random.uniform(-1, 1, n + 1))
+    noise = _lowpass(np.diff(np.random.uniform(-1, 1, n + 1)), 12000.0)
     tone = np.sin(2 * math.pi * 185 * t) * np.exp(-t * 22) * 0.6
     return (noise * 0.8 + tone) * np.exp(-t * 16)
 
@@ -188,7 +201,7 @@ def _snare():
 def _hat(open_):
     n = int((0.3 if open_ else 0.06) * RATE)
     t = np.arange(n) / RATE
-    noise = np.diff(np.random.uniform(-1, 1, n + 1))
+    noise = _lowpass(np.diff(np.random.uniform(-1, 1, n + 1)), 9000.0, poles=2)
     return noise * np.exp(-t * (9 if open_ else 45)) * 0.9
 
 
@@ -199,7 +212,8 @@ def _clap():
     for off in (0.0, 0.012, 0.024):
         mask = (t >= off).astype(float)
         sig += np.random.uniform(-1, 1, n) * np.exp(-np.maximum(t - off, 0) * 38) * mask
-    return sig * 0.8 + np.random.uniform(-1, 1, n) * np.exp(-t * 8) * 0.2
+    sig = _lowpass(sig, 12000.0)
+    return sig * 0.8 + _lowpass(np.random.uniform(-1, 1, n), 12000.0) * np.exp(-t * 8) * 0.2
 
 
 def _rim():

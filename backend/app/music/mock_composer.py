@@ -245,8 +245,16 @@ def compose(req):
     desc = req["description"]
     # 写词要求也参与风格/情绪识别（例：要求里写"失恋" -> sad）
     detect_text = (desc + " " + (req.get("lyrics_req") or "")).strip()
-    genre, _ = _detect(detect_text, GENRE_KEYWORDS, rng.choice(list(PROFILES.keys())))
-    mood, _ = _detect(detect_text, MOOD_KEYWORDS, rng.choice(list(schemas.MOODS)))
+    # 显式选择的风格/情绪必须生效；仅 auto 时按描述关键词识别
+    # （修复：此前关键词识别总是覆盖用户在 UI 里点的 genre/mood）
+    if req["genre"] != "auto":
+        genre = req["genre"]
+    else:
+        genre, _ = _detect(detect_text, GENRE_KEYWORDS, rng.choice(list(PROFILES.keys())))
+    if req["mood"] != "auto":
+        mood = req["mood"]
+    else:
+        mood, _ = _detect(detect_text, MOOD_KEYWORDS, rng.choice(list(schemas.MOODS)))
 
     profile = PROFILES[genre]
     if genre == "guofeng":
@@ -338,8 +346,14 @@ def mock_lyrics_text(req):
     seed = req["seed"] if req["seed"] is not None else _seed_of(req)
     rng = random.Random(seed ^ 0xA11CE)
     detect_text = ((req["description"] or "") + " " + (req.get("lyrics_req") or "")).strip()
-    mood, _ = _detect(detect_text, MOOD_KEYWORDS, rng.choice(list(schemas.MOODS)))
-    genre, _ = _detect(detect_text, GENRE_KEYWORDS, "pop")
+    if req["mood"] != "auto":
+        mood = req["mood"]
+    else:
+        mood, _ = _detect(detect_text, MOOD_KEYWORDS, rng.choice(list(schemas.MOODS)))
+    if req["genre"] != "auto":
+        genre = req["genre"]
+    else:
+        genre, _ = _detect(detect_text, GENRE_KEYWORDS, "pop")
     tpl = (RAP_LYRICS.get(mood) if genre == "rap" else None) or LYRICS[mood]
 
     def shuffled(key):

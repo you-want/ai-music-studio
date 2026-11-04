@@ -410,6 +410,23 @@ def _drums(spec, sections, total_bars, bpb, rng):
     start_bar = _first_drums_bar(spec, sections)
     events = []
 
+    # 前奏空拍修复：全鼓未进的 intro 先让 hat 轻进（保留"intro 减配"的呼吸感，
+    # 但不再整段无声——此前 intro 只有极低电平的 pad，成品前几秒近似静音）
+    for bar in range(min(start_bar, total_bars)):
+        if _section_of(sections, bar)["name"] != "intro":
+            continue
+        for dtype, steps in pattern.items():
+            if dtype not in ("hat", "ohat"):
+                continue
+            base = _DRUM_DEFAULT_VEL[dtype] + vel_adj.get(dtype, 0)
+            for step in steps:
+                off = step / 4.0
+                if swing and step % 4 == 2:
+                    off += SWING_BEATS
+                vel = base * 0.72 * (1.12 if step % 8 == 0 else 1.0) + rng.randint(-4, 4)
+                events.append({"type": dtype, "start": round(bar * bpb + off, 3),
+                               "vel": int(_clamp(vel, 20, 127))})
+
     for bar in range(start_bar, total_bars):
         sec = _section_of(sections, bar)
         sec_level = 0.72 if sec["name"] == "intro" else 1.08 if sec["name"] == "chorus" \

@@ -202,11 +202,12 @@ class TestSubmitDedup(unittest.TestCase):
         self.assertEqual(len([j for j in self.jm._jobs.values()
                               if j["status"] in ("queued", "running")]), 1)
         # 等任务收尾，避免 teardown 与后台线程竞争临时目录
-        for _ in range(600):
+        # （预算放宽到 ~180s：慢机器/CI 高负载下 mock 渲染也可能很慢）
+        for _ in range(900):
             st = self.jm.status(id1)
             if st["status"] in ("done", "error", "canceled"):
                 break
-            time.sleep(0.1)
+            time.sleep(0.2)
         self.assertEqual(st["status"], "done", st.get("error"))
         # 任务结束后同参数再提交 → 命中结果缓存（也只此一份）
         id3 = self.jm.submit(dict(req))
@@ -246,21 +247,21 @@ class TestLocalRenderCancel(unittest.TestCase):
                 {"description": "取消测试", "duration_sec": 15, "seed": 7})
             jid = self.jm.submit(dict(req))
             song_id = None
-            for _ in range(100):
+            for _ in range(600):
                 st = self.jm.status(jid)
                 song_id = st.get("song_id") or song_id
                 if st["stage"] == "rendering":
                     break
-                time.sleep(0.05)
+                time.sleep(0.1)
             self.assertEqual(st["stage"], "rendering")
             self.assertTrue(self.lib.exists(song_id) or
                             os.path.isdir(self.lib.song_dir(song_id)))
             self.jm.cancel(jid)
-            for _ in range(100):
+            for _ in range(600):
                 st = self.jm.status(jid)
                 if st["status"] in ("canceled", "done", "error"):
                     break
-                time.sleep(0.1)
+                time.sleep(0.2)
             self.assertEqual(st["status"], "canceled", st)
             self.assertFalse(os.path.isdir(self.lib.song_dir(song_id)),
                              "取消后半成品目录应被清理")

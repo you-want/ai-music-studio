@@ -28,6 +28,56 @@ class TestMockComposer(unittest.TestCase):
         b = mock_composer.compose(req)
         self.assertEqual(a, b)
 
+    def test_explicit_genre_mood_override_detection(self):
+        """UI 显式选择的风格/情绪必须生效（修复前被描述关键词识别覆盖）。"""
+        spec = mock_composer.compose(parse_request({
+            "description": "深夜骑车赶稿，节奏感强", "genre": "pop",
+            "mood": "romantic", "duration_sec": 30, "seed": 7}))
+        self.assertEqual(spec["genre"], "pop")
+        self.assertEqual(spec["mood"], "romantic")
+
+    def test_auto_mode_still_detects_keywords(self):
+        """auto 时保持原有关键词识别行为。"""
+        spec = mock_composer.compose(parse_request({
+            "description": "一首燃炸的说唱", "duration_sec": 40, "seed": 7}))
+        self.assertEqual(spec["genre"], "rap")
+
+
+class TestIntroPresence(unittest.TestCase):
+    def test_intro_has_light_hats_not_silence(self):
+        """修复前 intro 只有极低电平 pad，成品开头数秒近乎无声。"""
+        spec = mock_composer.compose({"description": "欢快", "genre": "pop",
+                                      "mood": "happy", "duration_sec": 30, "seed": 5})
+        song = realizer.realize(spec)
+        intro_beats = sum(s["beats"] for s in song["sections"] if s["name"] == "intro")
+        self.assertGreater(intro_beats, 0)
+        intro_drums = [d for d in song["drums"] if d["start"] < intro_beats]
+        self.assertTrue(intro_drums, "intro 应有轻 hat 进场，而不是整段空拍")
+        self.assertTrue(all(d["type"] in ("hat", "ohat") for d in intro_drums),
+                        "全鼓未进前 intro 只应安排 hat")
+
+    def test_hat_noise_is_band_limited(self):
+        """hat 白噪声应被低通压制（修复前 hat 直窜奈奎斯特，听感"沙沙"刺耳）。
+
+        断言 >16kHz 带内功率被抑制 ≥10dB（实测约 18dB）；不使用频段"占比"
+        断言——低通同时压低总能量，占比不随抑制幅度单调变化，易误报。
+        """
+        import numpy as np
+        from app.music import synth
+        h = synth._hat(False)
+        n = len(h)
+        raw = np.diff(np.random.uniform(-1, 1, n + 1))
+
+        def hi_band_power(sig):
+            spec = np.fft.rfft(sig)
+            freqs = np.fft.rfftfreq(n, 1.0 / synth.RATE)
+            return float((np.abs(spec[freqs >= 16000]) ** 2).sum())
+
+        suppression_db = 10 * np.log10(hi_band_power(raw) / max(hi_band_power(h), 1e-12))
+        self.assertGreaterEqual(suppression_db, 10.0,
+                                "hat >16k 带内功率应被抑制 ≥10dB（实测 %.1f dB）"
+                                % suppression_db)
+
     def test_keyword_detect(self):
         spec = mock_composer.compose({"description": "古风江湖仙侠水墨", "duration_sec": 30})
         self.assertEqual(spec["genre"], "guofeng")
