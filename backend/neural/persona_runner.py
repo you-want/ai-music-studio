@@ -23,8 +23,11 @@ import torch  # noqa: E402
 
 def main():
     job = json.load(open(sys.argv[1], "r", encoding="utf-8"))
-    emit = lambda p: (sys.stdout.write(json.dumps(p, ensure_ascii=False) + "\n"),
-                      sys.stdout.flush())
+
+    def emit(p):
+        sys.stdout.write(json.dumps(p, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
     from muq import MuQMuLan
     mulan = MuQMuLan.from_pretrained("./pretrained/muq").eval()
 

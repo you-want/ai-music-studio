@@ -45,7 +45,7 @@ class TestLyricsText(unittest.TestCase):
         # 15s 短曲可能没有主歌：[Verse] 歌词应并入自动分配而不是丢掉
         spec = mock_composer.compose({"description": "欢快", "duration_sec": 15, "seed": 5})
         schemas.apply_lyrics(spec, "[Verse]\nAAA\n[Chorus]\nBBB")
-        used = [l for s in spec["structure"] for l in s["lyrics"]]
+        used = [line for s in spec["structure"] for line in s["lyrics"]]
         self.assertIn("AAA", used)
         self.assertIn("BBB", used)
 
@@ -186,7 +186,7 @@ class TestAdvancedAPI(unittest.TestCase):
         self.assertEqual(full["meta"]["title"], "夏夜约定")
         self.assertEqual(full["spec"]["key"], "G")
         self.assertEqual(full["spec"]["lyrics_source"], "custom")
-        used = [l for s in full["spec"]["structure"] for l in s["lyrics"]]
+        used = [line for s in full["spec"]["structure"] for line in s["lyrics"]]
         self.assertIn("夏夜的风吹过屋顶", used)
         # 分轨可下载
         for name in ("vocal", "harmony", "bass", "drums"):

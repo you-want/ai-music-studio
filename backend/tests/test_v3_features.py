@@ -15,8 +15,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from app import schemas  # noqa: E402
-from app.music import coverpng, midi, mock_composer, realizer, synth  # noqa: E402
+from app.music import coverpng, mock_composer, realizer, synth  # noqa: E402
 
 
 class TestMasterChain(unittest.TestCase):
@@ -56,7 +55,7 @@ class TestArrangementDynamics(unittest.TestCase):
         spec = mock_composer.compose({"description": "电子舞曲 蹦迪", "duration_sec": 30, "seed": 5})
         song = realizer.realize(spec)
         bpb = song["beats_per_bar"]
-        name_of = {s["start_bar"]: s["name"] for s in song["sections"] for _ in [0]}
+
         def sec_name(bar):
             for s in song["sections"]:
                 if s["start_bar"] <= bar < s["start_bar"] + s["bars"]:

@@ -92,12 +92,12 @@ def align_chars_to_lines(lines, char_timeline):
     # 聚合到行：行首 = 该行第一个命中字的时间（无命中则用邻近命中/估计值插值）
     events, prev_end = [], 0.0
     for li, (est_t, text) in enumerate(lines):
-        idxs = [k for k, (l, _) in enumerate(lyric_chars) if l == li and char_hit[k] >= 0]
+        idxs = [k for k, (lc, _) in enumerate(lyric_chars) if lc == li and char_hit[k] >= 0]
         if idxs:
             starts = [char_timeline[char_hit[k]][1] for k in idxs]
             ends = [char_timeline[char_hit[k]][2] for k in idxs]
             start, end = min(starts), max(ends)
-            n_chars = sum(1 for (l, _) in lyric_chars if l == li)
+            n_chars = sum(1 for (lc, _) in lyric_chars if lc == li)
             conf = len(idxs) / float(n_chars)
         else:
             start, end, conf = est_t, est_t + 3.0, 0.0
@@ -141,8 +141,11 @@ def transcribe_chars(wav, model_size):
 def main():
     job = json.load(open(sys.argv[1], "r", encoding="utf-8"))
     lines = [[float(t), str(x)] for t, x in (job.get("lines") or [])]
-    emit = lambda p: (sys.stdout.write(json.dumps(p, ensure_ascii=False) + "\n"),
-                      sys.stdout.flush())
+
+    def emit(p):
+        sys.stdout.write(json.dumps(p, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
     timeline = transcribe_chars(job["wav"], job.get("model") or "small")
     events = align_chars_to_lines(lines, timeline)
     if job.get("out"):

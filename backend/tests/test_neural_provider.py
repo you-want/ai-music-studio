@@ -27,7 +27,7 @@ from app.store import Library  # noqa: E402
 from app.jobs import JobManager  # noqa: E402
 from app.music import mock_composer  # noqa: E402
 from app.providers import diffrhythm as dr  # noqa: E402
-from app.providers.audio_base import AudioProvider, CancelledError  # noqa: E402
+from app.providers.audio_base import AudioProvider, AudioProviderError, CancelledError  # noqa: E402
 from app.providers.diffrhythm import DiffRhythmProvider  # noqa: E402
 
 
@@ -215,7 +215,9 @@ class TestNeuralJobEndToEnd(unittest.TestCase):
                 data = (np.sin(2 * np.pi * 523 * t) * 20000).astype("<i2")
                 stereo = np.column_stack([data, data])
                 with wave.open(out_wav, "wb") as w:
-                    w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr)
+                    w.setnchannels(2)
+                    w.setsampwidth(2)
+                    w.setframerate(sr)
                     w.writeframes(stereo.tobytes())
                 if progress_cb:
                     progress_cb(1.0, "stub done")
@@ -302,7 +304,9 @@ class TestNeuralJobEndToEnd(unittest.TestCase):
         data = (np.sin(2 * np.pi * 300 * t) * 20000).astype("<i2")
         buf = io.BytesIO()
         with wave.open(buf, "wb") as w:
-            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(sr)
             w.writeframes(data.tobytes())
         st, b = self._req("/api/ref-audio", "POST", buf.getvalue())
         d = json.loads(b)
@@ -443,7 +447,6 @@ class TestAligner(unittest.TestCase):
 
 class TestFullLength(unittest.TestCase):
     def test_resolve_length_full_requires_weights(self):
-        p = DiffRhythmProvider()
         orig = dr.FULL_CFM
         dr.FULL_CFM = "/nonexistent/cfm_model_full.pt"
         try:
@@ -454,7 +457,6 @@ class TestFullLength(unittest.TestCase):
             dr.FULL_CFM = orig
 
     def test_resolve_length_full_ok_when_weights_exist(self):
-        p = DiffRhythmProvider()
         orig = dr.FULL_CFM
         with tempfile.NamedTemporaryFile(suffix=".pt") as f:
             dr.FULL_CFM = f.name

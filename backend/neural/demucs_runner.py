@@ -18,8 +18,10 @@ def main():
     wav = job["wav"]
     out_dir = job["out_dir"]
     model = job.get("model") or "htdemucs"
-    emit = lambda p: (sys.stdout.write(json.dumps(p, ensure_ascii=False) + "\n"),
-                      sys.stdout.flush())
+
+    def emit(p):
+        sys.stdout.write(json.dumps(p, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
 
     tmp = tempfile.mkdtemp(prefix="demucs-out-")
     try:

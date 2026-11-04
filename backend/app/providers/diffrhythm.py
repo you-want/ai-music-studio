@@ -22,7 +22,6 @@ import os
 import queue
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -406,7 +405,6 @@ class NeuralWorker:
         with self._lock:
             self._ensure()
             proc = self._proc
-            jid = str(job.get("id") or uuid.uuid4().hex[:12])
             path = job.get("_job_path")
             if not path:
                 raise AudioProviderError("worker 任务缺少 _job_path")

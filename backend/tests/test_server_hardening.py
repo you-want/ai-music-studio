@@ -7,7 +7,6 @@ import sys
 import tempfile
 import threading
 import unittest
-import urllib.request
 import wave
 
 import numpy as np

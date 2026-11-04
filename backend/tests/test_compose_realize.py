@@ -88,9 +88,8 @@ class TestRapGenre(unittest.TestCase):
         self.assertEqual(spec["genre"], "rap")
         self.assertEqual(spec["mode"], "minor")
         self.assertIn(82, range(82, 97) if spec["bpm"] in range(82, 97) else [spec["bpm"]])
-        verse = next(s for s in spec["structure"] if s["name"] == "verse")
-        self.assertTrue(any("麦在手里" in l or "verse里" in l for s in spec["structure"]
-                            for l in s["lyrics"]), "应使用说唱歌词模板")
+        self.assertTrue(any("麦在手里" in line or "verse里" in line for s in spec["structure"]
+                            for line in s["lyrics"]), "应使用说唱歌词模板")
 
     def test_boombap_vs_trap_drums(self):
         base = mock_composer.compose({"description": "深夜说唱", "duration_sec": 40, "seed": 7})
@@ -111,7 +110,6 @@ class TestRapGenre(unittest.TestCase):
         base = mock_composer.compose({"description": "深夜说唱", "duration_sec": 40, "seed": 7})
         hi = realizer.realize(dict(base, bpm=130))
         hats = [d for d in hi["drums"] if d["type"] == "hat"]
-        per_bar = len(hats) / (base["bpm"] and 1)  # 粗略
         self.assertGreater(len(hats), 8 * (hi["total_beats"] / 4) * 0.9, "trap hat 应更密(≥8/小节)")
 
     def test_rap_flow_narrow_melody(self):

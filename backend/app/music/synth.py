@@ -249,7 +249,6 @@ def render_all(song, wav_path, stems_dir, progress_cb=None):
 
 def _render_groups(song, progress_cb=None):
     """渲染全部分组（float32，只渲染一次；母带与分轨共用）。"""
-    import os
     n_total, spb, total_sec, voices, _ = _prepare(song)
     groups = {}
     for gi, (group, roles) in enumerate(GROUP_ROLES):

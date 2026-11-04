@@ -1,0 +1,14 @@
+# 高信号静态检查：只查语法错误、未定义名、未用导入/变量等（E4/E7/E9/F）。
+# DiffRhythm/ 是 vendored 的第三方模型代码，保持上游原貌，不参与检查。
+target-version = "py39"
+line-length = 100
+
+exclude = [
+    "DiffRhythm",
+    ".venv",
+    "backend/output",
+    "test-results",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

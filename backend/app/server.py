@@ -555,7 +555,7 @@ class Handler(BaseHTTPRequestHandler):
         sec_start = sec_meta["start_beat"] * spb
         sec_end = min((sec_meta["start_beat"] + sec_meta["beats"]) * spb,
                       float(meta.get("duration_sec") or 95))
-        lines = [l.strip() for l in new_lyrics.splitlines() if l.strip()]
+        lines = [ln.strip() for ln in new_lyrics.splitlines() if ln.strip()]
 
         new_spec = copy.deepcopy(spec)
         target = new_spec["structure"][sec_idx]
@@ -697,7 +697,7 @@ class Handler(BaseHTTPRequestHandler):
             label = schemas.SECTION_LABELS_ZH.get(sec["name"], sec["name"])
             lines.append("")
             lines.append("[%s]" % label)
-            lines.extend(l or "" for l in sec.get("lyrics", []))
+            lines.extend(line or "" for line in sec.get("lyrics", []))
         return "\n".join(lines)
 
     def _bundle(self, song_id, song_dir):

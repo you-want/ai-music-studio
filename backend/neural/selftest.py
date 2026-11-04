@@ -6,7 +6,6 @@
 
 全部通过打印 PASS 并退出码 0；任何一步失败打印 FAIL 与原因，退出码 1。
 """
-import json
 import os
 import resource
 import sys
@@ -92,8 +91,6 @@ def main():
         cond, pred_frames = get_reference_latent("cpu", 2048, False, None, None, ctx["vae"])
         end = 2048
         step_cond = torch.zeros_like(cond)
-        mask = torch.ones(1, end, 1, dtype=torch.bool)
-        duration = torch.full((1,), end, dtype=torch.long)
         text = ctx["lrc_emb"]
         sp, neg = ctx["style"], ctx["neg"]
         st, sd = ctx["start_time"], ctx["song_dur"]
@@ -108,7 +105,6 @@ def main():
             return pred + (pred - null) * 4.0
 
         torch.manual_seed(7)
-        y0 = torch.randn(end, cfm.num_channels, dtype=step_cond.dtype).unsqueeze(0)
         # 上游路径
         latents, _ = cfm.sample(cond=cond, text=text, duration=end,
                                 style_prompt=sp, max_duration=end, song_duration=sd,
@@ -133,7 +129,6 @@ def main():
         cond, _ = get_reference_latent("cpu", 2048, False, None, None, vae)
         end = 2048
         step_cond = torch.zeros_like(cond)
-        duration = torch.full((1,), end, dtype=torch.long)
         sp, neg = ctx["style"], ctx["neg"]
         st, sd = ctx["start_time"], ctx["song_dur"]
 
@@ -161,7 +156,9 @@ def main():
         path = os.path.join(os.getcwd(), "test_output", "selftest.wav")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with wave.open(path, "wb") as w:
-            w.setnchannels(2); w.setsampwidth(2); w.setframerate(44100)
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(44100)
             w.writeframes(arr.tobytes())
         return "2 步采样 %.1fs → %s（%.0fMB rss；正式 16 步约为其 8 倍时长）" % (
             sample_sec, path, rss_mb())

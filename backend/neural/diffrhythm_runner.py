@@ -175,7 +175,6 @@ def run_job(job, ctx, prog):
     prog(0.16, "风格就绪")
 
     # ---- 条件构造 ----
-    duration = torch.full((1,), end_frame, device=device, dtype=torch.long)
     if edit:
         # 分段重唱：参考曲编码为 latent（内部 vae_sample 消耗 RNG，seed 已在任务开头设置）
         prog(0.16, "编码原曲 latent…")

@@ -14,12 +14,10 @@
     mureka.api_key  AI_MUSIC_MUREKA_KEY      必填
     mureka.model    AI_MUSIC_MUREKA_MODEL    默认 mureka-6
 """
-import base64
 import json
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -200,7 +198,7 @@ class MurekaProvider(AudioProvider):
                          sec.get("name"), sec.get("name") or "")
             if label:
                 lines.append("[%s]" % label)
-            lines.extend(l for l in sec.get("lyrics", []) if l and l.strip())
+            lines.extend(line for line in sec.get("lyrics", []) if line and line.strip())
         if lines:
             payload["lyrics"] = "\n".join(lines)
         gender = (cfg.get("vocal_gender") or "").strip()
