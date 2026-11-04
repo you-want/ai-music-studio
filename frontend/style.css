@@ -388,6 +388,11 @@ button, a.ghost-btn {
   border: 1px solid var(--han-color-border);
 }
 #roll { display: block; }
+/* 频谱画布：CSS 定显示尺寸，属性只管分辨率。
+   若不约束，drawSpectrum 里 clientHeight×dpr 反馈循环会让画布每帧
+   指数变大，直到超过浏览器画布上限 → 位图分配失败 → 布局被巨块撑爆
+   （Retina 播放时必现）。 */
+#spectrum { display: block; width: 100%; height: 46px; }
 .playhead {
   position: absolute; top: 0; bottom: 0; width: 2px;
   background: var(--accent-danger);

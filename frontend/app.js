@@ -59,6 +59,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadPersonas();
   await refreshConfigBadge();
   await refreshLibrary();
+  // 深链：/?song=<id> 直接打开某首作品（&autoplay=1 自动播放；也便于自动化验证）
+  const deepLink = new URLSearchParams(location.search);
+  if (deepLink.get("song")) {
+    try {
+      await loadSong(deepLink.get("song"), deepLink.get("autoplay") === "1");
+    } catch (e) { console.error("深链作品加载失败", e); }
+  }
 });
 
 async function loadMeta() {
