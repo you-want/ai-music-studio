@@ -1,0 +1,20 @@
+# 构建上下文瘦身：排除大文件与本地产物
+.git
+.github
+.venv
+.venv-neural
+**/__pycache__
+**/.DS_Store
+
+# 模型权重与神经 venv（2.8GB+，不入镜像）
+DiffRhythm/pretrained
+DiffRhythm/.venv-neural
+DiffRhythm/test_output
+DiffRhythm/.worker.log*
+
+# 运行产物与测试残留
+backend/output
+test-results
+config.local.json
+config.json
+*.local.json

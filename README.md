@@ -137,7 +137,7 @@ ai-music-studio/
     ├── neural/               # v4 神经引擎
     │   ├── diffrhythm_runner.py  # 模型推理子进程（进度 JSON 协议）
     │   └── selftest.py           # 安装自检（--mini 微型生成 / --verify-euler）
-    ├── tests/                # 79 个单元 + 端到端测试
+    ├── tests/                # 单元 + 端到端测试（CI 会跑 ruff + unittest）
     └── app/
         ├── server.py         # HTTP API + 静态资源 + Range 流媒体 + Token 鉴权（纯标准库）
         ├── jobs.py           # 异步任务：作曲 → 编曲/神经渲染，前端轮询进度，可取消
@@ -184,8 +184,22 @@ ai-music-studio/
 ## 测试
 
 ```bash
-cd backend && python3 -m unittest discover -s tests   # 107 个用例
+cd backend && python3 -m unittest discover -s tests
 ```
+
+CI（GitHub Actions）会在 Python 3.9 / 3.12 上运行 ruff 与全部测试。
+
+## Docker 部署
+
+```bash
+AI_MUSIC_TOKEN=你的口令 docker compose up -d    # http://<主机>:8766
+```
+
+- 镜像包含离线 Mock / LLM / Mureka 云引擎与 MV 导出（内置 ffmpeg）；
+  **神经歌声引擎（DiffRhythm）不在镜像内**（2.8GB 权重 + 独立 venv），本机部署即可使用；
+- 曲库通过 named volume `songweaver-output` 持久化；LLM/Mureka Key 建议挂载
+  `config.local.json`（只读）或用 `AI_MUSIC_LLM_*` 环境变量，勿打进镜像；
+- 服务端拒绝"非本机绑定且无 Token"的启动，compose 里 Token 必填。
 
 ## 关于收费模型（现阶段的取舍）
 

@@ -29,6 +29,7 @@ import copy  # noqa: E402
 
 from app import personas as persona_store  # noqa: E402
 from app import schemas  # noqa: E402
+from app import __version__  # noqa: E402
 from app.providers import mureka as mureka_provider  # noqa: E402
 from app.jobs import JobManager  # noqa: E402
 from app.music import coverpng, midi, mock_composer, realizer, singer, synth, theory  # noqa: E402
@@ -89,7 +90,7 @@ class _BodyTooLarge(Exception):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AIMusicStudio/1.1"
+    server_version = "SongWeaver/" + __version__
     protocol_version = "HTTP/1.1"
     _video_locks = {}  # song_id -> Lock：MV 导出防并发双写（见 _video）
 
@@ -223,7 +224,8 @@ class Handler(BaseHTTPRequestHandler):
             if denied is not None:
                 return denied
             if path == "/api/health":
-                return self._send(200, {"ok": True, "name": "SongWeaver (织歌)"})
+                return self._send(200, {"ok": True, "name": "SongWeaver (织歌)",
+                                        "version": __version__})
             if path == "/api/session" and method == "POST":
                 # 用一次性 Bearer 换取派生会话 Cookie（Cookie 不落原始 Token）
                 if not STATE.token:

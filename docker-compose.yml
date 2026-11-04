@@ -1,0 +1,26 @@
+# 织歌 SongWeaver 部署：docker compose up -d
+# Token 必填（缺失时 compose 直接报错，服务端也会拒绝无 Token 启动）。
+#   AI_MUSIC_TOKEN=你的口令 docker compose up -d
+services:
+  songweaver:
+    build: .
+    image: songweaver:latest
+    ports:
+      - "8766:8766"
+    environment:
+      AI_MUSIC_HOST: 0.0.0.0
+      AI_MUSIC_PORT: "8766"
+      AI_MUSIC_TOKEN: ${AI_MUSIC_TOKEN:?请先设置环境变量 AI_MUSIC_TOKEN（访问口令）}
+      # 可选：LLM 直连配置（等价于网页设置里填写；也可挂载 config.local.json）
+      # AI_MUSIC_LLM_API_KEY: your-key
+      # AI_MUSIC_LLM_BASE_URL: https://open.bigmodel.cn/api/paas/v4
+      # AI_MUSIC_LLM_MODEL: glm-4-flash
+    volumes:
+      # 曲库持久化（作品/任务记录/参考音频/TTS 缓存都在这里面）
+      - songweaver-output:/app/backend/output
+      # 可选：挂载本地配置（含 Mureka Key 等敏感信息，勿打进镜像）
+      # - ./config.local.json:/app/config.local.json:ro
+    restart: unless-stopped
+
+volumes:
+  songweaver-output:
