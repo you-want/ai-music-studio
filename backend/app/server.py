@@ -6,6 +6,7 @@
 import hmac
 from http.cookies import SimpleCookie
 import json
+import logging
 import os
 import random
 import re
@@ -20,6 +21,7 @@ import urllib.request
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 
 _BACK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACK not in sys.path:
@@ -44,6 +46,18 @@ CONFIG_PATH = os.environ.get("AI_MUSIC_CONFIG") or os.path.join(ROOT, "config.lo
 MAX_JSON_BODY = 1 * 1024 * 1024       # JSON 请求体上限 1MB
 MAX_REF_AUDIO = 25 * 1024 * 1024      # 参考音频上限 25MB
 SEND_CHUNK = 1 * 1024 * 1024          # 文件流式发送块大小
+
+LOGGER = logging.getLogger("songweaver.server")
+
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+}
+# HTML 页面基础 CSP：前端无内联脚本、无外链资源，连接限本源；
+# style 放开 unsafe-inline（设置弹窗等元素带内联 style 属性）
+CSP_HTML = ("default-src 'self'; img-src 'self' data:; media-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+            "connect-src 'self'; font-src 'self'")
 
 MIME = {
     ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -99,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
         message = fmt % args
         # Query-string bearer tokens must never land in access logs.
         message = re.sub(r"([?&]token=)[^& ]+", r"\1<redacted>", message)
-        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), message))
+        LOGGER.info(message)
 
     def _send(self, code, body, content_type="application/json; charset=utf-8", extra=None):
         if isinstance(body, (dict, list)):
@@ -110,7 +124,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        for k, v in (extra or {}).items():
+        headers = dict(SECURITY_HEADERS)
+        headers.update(extra or {})
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -185,7 +201,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(size))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-cache")
-        for k, v in (extra_headers or {}).items():
+        headers = dict(SECURITY_HEADERS)
+        headers.update(extra_headers or {})
+        if ext == ".html":
+            headers["Content-Security-Policy"] = CSP_HTML
+        for k, v in headers.items():
             self.send_header(k, v)
         self.end_headers()
         try:
@@ -407,6 +427,7 @@ class Handler(BaseHTTPRequestHandler):
         except _BodyTooLarge:
             return self._send(413, {"error": "请求体过大（上限 1MB）"})
         except Exception as e:  # noqa: BLE001
+            LOGGER.exception("请求处理失败（500）")
             return self._send(500, {"error": str(e)})
 
     def _api_config_get(self):
@@ -623,8 +644,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not lib.exists(sid):
                     continue
                 d = lib.song_dir(sid)
-                folder = "album/" + re.sub(r'[\\/:*?"<>|]', "_",
-                                           lib.get_meta(sid).get("title", sid))
+                raw_title = str(lib.get_meta(sid).get("title") or sid)
+                # 防穿越/防隐藏目录：替换非法字符后去掉首尾点与空白（".." 会逃出 album/）
+                safe_title = re.sub(r'[\\/:*?"<>|]', "_", raw_title).strip(". ") or sid
+                folder = "album/" + safe_title
                 z.write(lib.wav_path(sid), folder + "/song.wav")
                 z.write(self._ensure_cover(sid, d), folder + "/cover.png")
                 z.writestr(folder + "/lyrics.txt", self._lyrics_text(sid))
@@ -675,6 +698,7 @@ class Handler(BaseHTTPRequestHandler):
             lib.save(new_id, spec, song)
             return self._send(200, {"song_id": new_id, "title": spec["title"]})
         except Exception as e:  # noqa: BLE001
+            LOGGER.exception("请求处理失败（500）")
             return self._send(500, {"error": str(e)})
 
     def _export_route(self, song_id, filename):
@@ -839,7 +863,32 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         if os.path.isfile(target):
             return self._send_file(target)
-        return self._send(404, {"error": "not found", "path": path})
+        return self._send(404, {"error": "not found"})
+
+
+def _setup_logging():
+    """stderr + 轮转文件（backend/output/_logs/server.log，5MB x 3）。
+
+    AI_MUSIC_LOG_LEVEL 控制级别（默认 INFO）。仅 main() 启用时配置：
+    测试环境没有 handler，INFO 级访问日志自动静默，不污染测试输出。
+    """
+    level = os.environ.get("AI_MUSIC_LOG_LEVEL", "INFO").upper()
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level, logging.INFO))
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    stream = logging.StreamHandler(sys.stderr)
+    stream.setFormatter(fmt)
+    root.handlers = [stream]
+    try:
+        log_dir = os.path.join(_BACK, "output", "_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        fh = RotatingFileHandler(os.path.join(log_dir, "server.log"),
+                                 maxBytes=5 * 1024 * 1024, backupCount=2,
+                                 encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError:
+        pass
 
 
 def create_server(host="127.0.0.1", port=8766, lib_dir=None, config_path=None, frontend_dir=None):
@@ -850,6 +899,7 @@ def create_server(host="127.0.0.1", port=8766, lib_dir=None, config_path=None, f
 
 
 def main():
+    _setup_logging()
     host = os.environ.get("AI_MUSIC_HOST", "127.0.0.1")
     port = int(os.environ.get("AI_MUSIC_PORT", "8766"))
     token = os.environ.get("AI_MUSIC_TOKEN") or ""

@@ -6,8 +6,11 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 
 _BACK = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _BACK not in sys.path:
@@ -17,6 +20,52 @@ from app import schemas  # noqa: E402
 from app import server as server_mod  # noqa: E402
 from app.jobs import JobManager, JOB_SNAPSHOT_RETENTION_SEC, REF_AUDIO_RETENTION_SEC  # noqa: E402
 from app.store import Library  # noqa: E402
+
+
+class TestSecurityHeaders(unittest.TestCase):
+    """安全响应头：API 带 X-Frame-Options/Referrer-Policy，HTML 加 CSP，404 不回显路径。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="aimusic-sec3-")
+        cls.httpd = server_mod.create_server(
+            "127.0.0.1", 0,
+            lib_dir=os.path.join(cls.tmp, "lib"),
+            config_path=os.path.join(cls.tmp, "config.local.json"),
+        )
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _get(self, path):
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path))
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, dict(r.headers), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read()
+
+    def test_api_security_headers(self):
+        st, h, _ = self._get("/api/health")
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("X-Frame-Options"), "DENY")
+        self.assertEqual(h.get("Referrer-Policy"), "no-referrer")
+
+    def test_html_page_has_csp(self):
+        st, h, _ = self._get("/")
+        self.assertEqual(st, 200)
+        csp = h.get("Content-Security-Policy", "")
+        self.assertIn("default-src 'self'", csp)
+        self.assertIn("script-src 'self'", csp)
+
+    def test_static_404_does_not_echo_path(self):
+        st, _, body = self._get("/no-such-file-xyz.js")
+        self.assertEqual(st, 404)
+        self.assertNotIn(b"no-such-file-xyz.js", body)
 
 
 class TestRequestFieldLimits(unittest.TestCase):

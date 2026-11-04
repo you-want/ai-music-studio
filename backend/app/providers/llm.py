@@ -77,6 +77,14 @@ def _endpoint(base_url):
     return base + "/chat/completions"
 
 
+def _temperature(llm):
+    """钳制采样温度到 [0, 2]（配置手填时的容错）。"""
+    try:
+        return max(0.0, min(2.0, float(llm.get("temperature", 0.9))))
+    except (TypeError, ValueError):
+        return 0.9
+
+
 def _extract_json(text):
     """从模型回复里抠出 JSON（剥掉代码块围栏、前后废话）。"""
     if not text:
@@ -184,21 +192,12 @@ def provide(req, config):
             {"role": "system", "content": SYSTEM_PROMPT % target_bars},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": float(llm.get("temperature", 0.9)),
+        "temperature": _temperature(llm),
         "max_tokens": 3000,
     }
-    http_req = urllib.request.Request(
-        _endpoint(llm["base_url"]),
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json",
-                 "Authorization": "Bearer %s" % llm["api_key"]},
-        method="POST",
-    )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(http_req, timeout=int(llm.get("timeout", 90)),
-                                    context=_ssl_context()) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _chat(payload, llm)  # 429/5xx 自动退避重试
         content = data["choices"][0]["message"]["content"]
     except Exception as e:  # 网络/鉴权/限流等
         return None, {"reason": "LLM 请求失败: %s" % e}
@@ -292,7 +291,7 @@ def provide_lyrics(req, config):
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": float(llm.get("temperature", 0.9)),
+        "temperature": _temperature(llm),
         "max_tokens": 1200,
     }
     try:

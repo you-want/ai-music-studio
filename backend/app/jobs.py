@@ -8,6 +8,7 @@ v5：多音频 Provider（本地 DiffRhythm 常驻 worker / 云端 Mureka）、
 """
 import os
 import json
+import logging
 import shutil
 import threading
 import time
@@ -26,6 +27,8 @@ from .providers.diffrhythm import provider as diffrhythm_provider
 from .providers.diffrhythm import resolve_audio_length as neural_resolve_length
 from .providers.diffrhythm import separate as neural_separate
 from .providers.diffrhythm import venv_has_module as neural_has_module
+
+LOGGER = logging.getLogger("songweaver.jobs")
 
 STAGES_ZH = {
     "queued": "排队中…",
@@ -308,6 +311,7 @@ class JobManager:
                        stage_note=STAGES_ZH["canceled"], progress=0.0)
             self._persist(job)
         except Exception as e:  # 任何阶段失败都要反映到任务状态
+            LOGGER.exception("任务 %s 失败", job["id"])
             job.update(status="error", stage="error", stage_note=STAGES_ZH["error"],
                        error=str(e))
             self._persist(job)

@@ -38,6 +38,14 @@ class TestProvideGuard(unittest.TestCase):
         self.assertEqual(llm._endpoint("https://x/v1/chat/completions"),
                          "https://x/v1/chat/completions")
 
+    def test_temperature_clamped(self):
+        # 手填配置的容错：越界/非法值都收敛到 [0, 2]
+        self.assertEqual(llm._temperature({"temperature": 5}), 2.0)
+        self.assertEqual(llm._temperature({"temperature": -1}), 0.0)
+        self.assertEqual(llm._temperature({"temperature": "abc"}), 0.9)
+        self.assertEqual(llm._temperature({}), 0.9)
+        self.assertEqual(llm._temperature({"temperature": 1.3}), 1.3)
+
 
 class TestSpecRepair(unittest.TestCase):
     def test_repair_llm_spec(self):
