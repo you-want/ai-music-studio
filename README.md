@@ -127,6 +127,7 @@ ai-music-studio/
 ├── scripts/run.sh            # 一键启动
 ├── scripts/setup_neural.sh   # 神经歌声引擎安装（v4，可选）
 ├── config.example.json       # LLM 配置样例（复制为 config.local.json）
+├── CHANGELOG.md              # 更新日志（版本与变更摘要）
 ├── docs/DESIGN.md            # 设计文档（架构 / SongSpec 契约 / 路线图）
 ├── docs/BENCHMARK.md         # 对标研究：商业产品矩阵 + 开源模型选型（v4）
 ├── DiffRhythm/               # 开源模型（Apache-2.0）+ 预训练权重 + 独立 venv
