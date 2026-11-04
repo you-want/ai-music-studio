@@ -321,7 +321,14 @@ class NeuralWorker:
                 self._log_fh.close()
             except OSError:
                 pass
-        self._log_fh = open(self._log_path(), "ab")
+        log_path = self._log_path()
+        try:
+            # 日志轮转：超 10MB 归档为 .worker.log.1（只留一代，防长期运行无限膨胀）
+            if os.path.getsize(log_path) > 10 * 1024 * 1024:
+                os.replace(log_path, log_path + ".1")
+        except OSError:
+            pass
+        self._log_fh = open(log_path, "ab")
         proc = subprocess.Popen(
             [py, RUNNER, "--serve"], cwd=DIFFRHYTHM_DIR, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._log_fh,

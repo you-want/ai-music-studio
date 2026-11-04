@@ -43,6 +43,8 @@ MAX_RENDER_SLOTS = 2      # 本地渲染同时上限（防内存挤爆），其�
 MAX_NEURAL_SLOTS = 1      # 神经模型同时上限（模型占 ~10GB 内存）
 MAX_PENDING_JOBS = 32     # 防止无限创建后台线程耗尽内存
 AUDIO_PROVIDERS = {"diffrhythm", "mureka"}
+JOB_SNAPSHOT_RETENTION_SEC = 24 * 3600   # 终态任务快照保留 24h，防止 _jobs 无限增长
+REF_AUDIO_RETENTION_SEC = 7 * 24 * 3600  # 参考音频保留 7 天（被进行中任务引用的不清理）
 
 
 def _wav_duration(path):
@@ -64,9 +66,11 @@ class JobManager:
         self._neural_slot = threading.BoundedSemaphore(MAX_NEURAL_SLOTS)
         self._job_dir = (os.path.join(self.store.lib_dir, "_jobs")
                          if self.store is not None else None)
+        self._job_refs = {}  # job_id -> 参考音频文件名（清理 _refs 时保护进行中任务）
         if self._job_dir:
             os.makedirs(self._job_dir, exist_ok=True)
             self._load_interrupted_jobs()
+            self._gc_disk()
 
     def _job_path(self, job_id):
         if not self._job_dir:
@@ -120,7 +124,11 @@ class JobManager:
                                    % MAX_PENDING_JOBS)
             self._jobs[job_id] = job
             self._cancel_events[job_id] = threading.Event()
+            ref_name = req.get("ref_audio")
+            if isinstance(ref_name, str) and ref_name:
+                self._job_refs[job_id] = ref_name
             self._persist(job)
+            self._gc_disk()
             if len(self._jobs) > 100:  # 只清理终态任务，不能丢运行中任务
                 terminal = [item for item in self._jobs.values()
                             if item["status"] in ("done", "error", "canceled")]
@@ -164,6 +172,48 @@ class JobManager:
     def _finished(self, job_id):
         with self._lock:
             self._cancel_events.pop(job_id, None)
+            self._job_refs.pop(job_id, None)
+
+    def _gc_disk(self):
+        """磁盘残留清理（submit 与启动时顺带执行）：过期任务快照与参考音频。
+
+        只删 >24h 的快照（排队/运行中任务的快照不删）与 >7 天未被访问、
+        且不被进行中任务引用的参考音频，防止 output/_jobs 与 output/_refs
+        随长期运行无限膨胀。调用方需持有 self._lock。
+        """
+        now = time.time()
+        if self._job_dir:
+            active = {j["id"] for j in self._jobs.values()
+                      if j["status"] in ("queued", "running")}
+            try:
+                names = os.listdir(self._job_dir)
+            except OSError:
+                names = []
+            for name in names:
+                if not name.endswith(".json") or name[:-5] in active:
+                    continue
+                path = os.path.join(self._job_dir, name)
+                try:
+                    if now - os.path.getmtime(path) > JOB_SNAPSHOT_RETENTION_SEC:
+                        os.remove(path)
+                except OSError:
+                    continue
+        refs_dir = self.store.refs_dir() if self.store is not None else None
+        if refs_dir:
+            protected = {v for v in self._job_refs.values() if v}
+            try:
+                ref_names = os.listdir(refs_dir)
+            except OSError:
+                ref_names = []
+            for name in ref_names:
+                if name in protected:
+                    continue
+                path = os.path.join(refs_dir, name)
+                try:
+                    if now - os.path.getmtime(path) > REF_AUDIO_RETENTION_SEC:
+                        os.remove(path)
+                except OSError:
+                    continue
 
     # ---------------------------------------------------------------- 流水线
     def _run(self, job, req, fp=None):

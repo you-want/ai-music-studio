@@ -83,7 +83,8 @@ def parse_request(raw):
     if composer_provider is None and provider in ("local", "diffrhythm", "mureka"):
         composer_provider = "mock"
     req = {
-        "description": str(raw.get("description") or "").strip(),
+        # 自由文本统一限长：1MB 请求体里的超长内容不得直通 meta/LLM prompt/指纹
+        "description": _clip_text(raw.get("description"), 500),
         "genre": raw.get("genre") if raw.get("genre") in GENRES else "auto",
         "mood": raw.get("mood") if raw.get("mood") in MOODS else "auto",
         "bpm": _clamp(_as_int(raw.get("bpm"), 0) or 0, 0, 240) or None,
@@ -94,9 +95,9 @@ def parse_request(raw):
         # New clients choose composition and audio generation independently.
         # Missing this field preserves the legacy provider behavior.
         "composer_provider": composer_provider,
-        "title": str(raw.get("title") or "").strip() or None,
+        "title": _clip_text(raw.get("title"), 60),
         "seed": _as_int(raw.get("seed")),
-        "lyrics": str(raw.get("lyrics") or "").strip() or None,
+        "lyrics": clip_multiline_text(raw.get("lyrics"), 5000),
         "lead_voice": raw.get("lead_voice") if raw.get("lead_voice") in LEAD_VOICES else None,
         # tri-state: None=用户没表态 -> 默认演唱；True/False=显式开关
         "sing": None if raw.get("sing") is None else bool(raw.get("sing")),
@@ -129,6 +130,15 @@ def _clip_text(v, limit):
     if not v:
         return None
     text = re.sub(r"\s+", " ", str(v)).strip()
+    return text[:limit] or None
+
+
+def clip_multiline_text(v, limit):
+    """多行文本（歌词等）：保留换行结构（段落标记靠换行识别）、限总长。"""
+    if not v:
+        return None
+    lines = [re.sub(r"[ \t\f\v]+", " ", ln).strip() for ln in str(v).splitlines()]
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
     return text[:limit] or None
 
 
@@ -183,7 +193,7 @@ def validate_and_repair_spec(raw, req):
             tonic = theory.chord_symbol(key_pc, "min" if mode in ("minor", "minor_pentatonic") else "maj")
             chords = [tonic]
             warnings.append("section %s 无有效和弦，用主和弦填充" % name)
-        lyrics = [str(x) for x in sec.get("lyrics", []) if isinstance(x, (str, int))] \
+        lyrics = [str(x)[:200] for x in sec.get("lyrics", []) if isinstance(x, (str, int))] \
             if isinstance(sec.get("lyrics"), list) else []
         fixed.append({"name": name, "bars": bars, "chords": chords, "lyrics": lyrics})
 
@@ -200,7 +210,7 @@ def validate_and_repair_spec(raw, req):
     spec = {
         "version": 1,
         "title": title,
-        "description": str(raw.get("description") or req.get("description") or ""),
+        "description": str(raw.get("description") or req.get("description") or "")[:500],
         "genre": genre,
         "mood": mood,
         "key": theory.NOTE_NAMES[key_pc],

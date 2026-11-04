@@ -131,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
                 morsel = cookie.get("aimusic_session")
             except Exception:
                 morsel = None
-            if morsel and self._validate_session(morsel.value):
+            if morsel and self._validate_session(STATE.token, morsel.value):
                 return None
         return self._send(401, {"error": "未授权：缺少或错误的访问 Token"},
                           extra={"WWW-Authenticate": "Bearer"})
@@ -139,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
     SESSION_TTL_SEC = 43200  # 会话 Cookie 有效期（12 小时）
 
     @staticmethod
-    def _session_value(exp):
+    def _session_value(token, exp):
         """访问 Token 的派生会话凭证：HMAC(token, "v1:过期时间") + 过期时间。
 
         Cookie 里不再保存原始 Token：泄漏 Cookie 只得到一个 12 小时后自动
@@ -147,11 +147,11 @@ class Handler(BaseHTTPRequestHandler):
         服务重启后依然有效。
         """
         msg = ("aimusic-session-v1:%d" % exp).encode("utf-8")
-        mac = hmac.new(STATE.token.encode("utf-8"), msg, "sha256").hexdigest()
+        mac = hmac.new(token.encode("utf-8"), msg, "sha256").hexdigest()
         return "%s.%d" % (mac, exp)
 
     @classmethod
-    def _validate_session(cls, value):
+    def _validate_session(cls, token, value):
         try:
             mac, exp_s = value.rsplit(".", 1)
             exp = int(exp_s)
@@ -159,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if exp <= time.time() or exp > int(time.time()) + cls.SESSION_TTL_SEC * 2:
             return False
-        return hmac.compare_digest(mac + "." + exp_s, cls._session_value(exp))
+        return hmac.compare_digest(mac + "." + exp_s, cls._session_value(token, exp))
 
     def _json_body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -232,7 +232,7 @@ class Handler(BaseHTTPRequestHandler):
                 exp = int(time.time()) + Handler.SESSION_TTL_SEC
                 return self._send(200, {"ok": True}, extra={
                     "Set-Cookie": "aimusic_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
-                    % (Handler._session_value(exp), Handler.SESSION_TTL_SEC, secure)})
+                    % (Handler._session_value(STATE.token, exp), Handler.SESSION_TTL_SEC, secure)})
             if path == "/api/meta" and method == "GET":
                 return self._send(200, {
                     "genres": [{"id": g, "label": schemas.GENRE_LABELS_ZH[g]} for g in schemas.GENRES],
@@ -537,7 +537,7 @@ class Handler(BaseHTTPRequestHandler):
             sec_idx = int(body.get("section_index", -1))
         except (TypeError, ValueError):
             return self._send(400, {"error": "section_index 非法"})
-        new_lyrics = str(body.get("new_lyrics") or "").strip()
+        new_lyrics = schemas.clip_multiline_text(body.get("new_lyrics"), 2000) or ""
         if not new_lyrics:
             return self._send(400, {"error": "新歌词不能为空"})
         try:
