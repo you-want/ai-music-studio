@@ -468,8 +468,8 @@ button, a.ghost-btn {
   z-index: 50; backdrop-filter: blur(8px);
 }
 .modal-card { width: min(560px, 100%); max-height: calc(100dvh - 40px); overflow-y: auto; padding: 24px; }
-.check-row { display: flex; gap: 8px; align-items: center; font-size: 14px; margin-top: 10px; }
-.check-row input { width: auto; accent-color: var(--han-color-accent); }
+.check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; margin-top: 10px; }
+.check-row input { width: auto; accent-color: var(--han-color-accent); margin-top: 3px; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; flex-wrap: wrap; }
 .muted { color: var(--han-color-text-secondary); font-size: 13px; line-height: 1.7; }
 .muted a { color: var(--accent-cyan); }

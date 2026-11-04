@@ -491,6 +491,11 @@ async function loadSong(songId, autoplay) {
   drawRoll();
   rebuildLyrics();   // 切歌必须重建歌词索引（否则显示上一首的歌词）
   updateLyric(0, true);
+  // 播放头启用（随播放自动跟随卷帘）
+  $("playhead").classList.remove("hidden");
+  // 面板从隐藏切到双栏布局时宽度会变，布局稳定后补画一帧，
+  // 避免卷帘按过渡态宽度绘制（ResizeObserver 兜底，见 bindEvents）
+  requestAnimationFrame(() => { if (state.currentSongId === songId) drawRoll(); });
   if (autoplay) { try { await audio.play(); } catch (e) { /* 自动播放被拦时忽略 */ }
   }
 }
@@ -1339,6 +1344,13 @@ function bindEvents() {
   $("btn-regen").onclick = regenChorus;
   $("btn-mv").onclick = mvExport;
   $("lib-search").oninput = renderLibrary;
+  // 卷帘随容器尺寸变化自动重绘：双栏切换的过渡态、窗口缩放、开发者工具
+  // 开合都会改变 roll-wrap 宽度；rAF 合并抖动，避免连续重排
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => {
+      requestAnimationFrame(() => { if (state.score) drawRoll(); });
+    }).observe($("roll-wrap"));
+  }
   window.addEventListener("resize", () => {
     if (state.score) drawRoll();
     drawSpectrum();
