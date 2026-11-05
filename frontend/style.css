@@ -19,6 +19,7 @@
   --sw-compose-width: 680px;
   --sw-compose-column: 380px;
   /* 墨色深底 — 比 landscape 更有层次 */
+  --han-font-kai:           "Kaiti SC", "STKaiti", "KaiTi", "PingFang SC", serif;
   --han-color-bg:           #0c1210;
   --han-color-bg-surface:   #141e18;
   --han-color-bg-elevated:  #1b2720;
@@ -274,7 +275,7 @@ button, a.ghost-btn {
 }
 .han-btn.seal-btn::before {
   content: ""; position: absolute; inset: 3px;
-  border: 1px solid rgba(255,255,255,0.2); border-radius: calc(var(--han-radius-md) - 2px);
+  border: 1px solid var(--han-color-border); border-radius: calc(var(--han-radius-md) - 2px);
   pointer-events: none;
 }
 .han-btn.seal-btn:hover {
@@ -445,7 +446,7 @@ button, a.ghost-btn {
 .song-item .del {
   position: absolute; top: 10px; right: 10px; width: 22px; height: 22px;
   line-height: 20px; text-align: center; border-radius: 50%;
-  background: rgba(255,255,255,0.04); color: var(--han-color-text-tertiary);
+  background: color-mix(in srgb, var(--han-color-text-primary) 4%, transparent); color: var(--han-color-text-tertiary);
   font-size: 12px; cursor: pointer; border: 1px solid var(--han-color-border);
   transition: all var(--han-duration-normal);
 }
@@ -480,7 +481,7 @@ button, a.ghost-btn {
   border: 1px solid rgba(90, 173, 126, 0.2);
   font-size: 12.5px; line-height: 1.7; color: var(--han-color-text-secondary);
 }
-.neural-box code { background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+.neural-box code { background: color-mix(in srgb, var(--han-color-text-primary) 6%, transparent); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
 .ref-file { font-size: 12px; color: var(--han-color-text-tertiary); max-width: 180px; }
 .hint-inline { font-size: 12px; color: var(--accent-cyan); }
 
@@ -538,7 +539,7 @@ hr.sep::after {
    ============================================================ */
 .badge {
   font-size: 11px; padding: 3px 9px; border-radius: 999px;
-  background: rgba(255,255,255,0.05); color: var(--han-color-text-tertiary);
+  background: color-mix(in srgb, var(--han-color-text-primary) 5%, transparent); color: var(--han-color-text-tertiary);
   white-space: nowrap;
 }
 .badge.on { background: rgba(111, 184, 196, 0.12); color: var(--accent-cyan); }
@@ -637,3 +638,5 @@ footer {
     transition-duration: 0.01ms !important;
   }
 }
+
+.theme-sel { margin-left: auto; width: auto; padding: 6px 10px; font-size: 12.5px; border-radius: 9px; background: color-mix(in srgb, var(--han-color-text-primary) 5%, transparent); }
