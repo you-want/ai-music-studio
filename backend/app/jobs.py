@@ -67,6 +67,7 @@ class JobManager:
         self._lock = threading.Lock()
         self._slots = threading.BoundedSemaphore(MAX_RENDER_SLOTS)
         self._neural_slot = threading.BoundedSemaphore(MAX_NEURAL_SLOTS)
+        self._compose_lock = threading.Lock()  # LLM 作曲串行（同一代理并发会互相拖慢）
         self._job_dir = (os.path.join(self.store.lib_dir, "_jobs")
                          if self.store is not None else None)
         self._job_refs = {}   # job_id -> 参考音频文件名（清理 _refs 时保护进行中任务）
@@ -343,6 +344,9 @@ class JobManager:
         spec["provider"] = req.get("provider")
         source = (info or {}).get("provider", "mock")
         spec["composer_provider"] = "mock" if source.startswith("mock") else source
+        if source.startswith("mock"):
+            job.update(stage_note="⚠️ LLM 超时，歌词为模板兜底（重试可得更好歌词）")
+            source += "（歌词模板兜底）"
         spec["audio_only"] = True
         spec.pop("lead_voice", None)  # 音色由模型决定
         self._resolve_persona(req)
@@ -493,18 +497,20 @@ class JobManager:
         spec["provider"] = "mock"
         return spec, info
 
-    def _llm_with_budget(self, req, cfg, budget_sec=180):
-        """带硬预算的 LLM 作曲：后台线程执行，超时放弃（线程自行消亡）回落。"""
-        box = {}
+    def _llm_with_budget(self, req, cfg, budget_sec=300):
+        """带硬预算的 LLM 作曲：串行锁（同一代理并发会互相拖慢）+
+        后台线程执行，超时放弃（线程自行消亡）回落。"""
+        with self._compose_lock:
+            box = {}
 
-        def worker():
-            try:
-                box["result"] = llm_provider.provide(req, cfg)
-            except Exception as e:  # noqa: BLE001
-                box["result"] = (None, {"reason": str(e)})
-        t = threading.Thread(target=worker, daemon=True)
-        t.start()
-        t.join(budget_sec)
-        if "result" not in box:
-            return None, {"reason": "LLM 作曲超过 %d 秒未返回" % budget_sec}
-        return box["result"]
+            def worker():
+                try:
+                    box["result"] = llm_provider.provide(req, cfg)
+                except Exception as e:  # noqa: BLE001
+                    box["result"] = (None, {"reason": str(e)})
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            t.join(budget_sec)
+            if "result" not in box:
+                return None, {"reason": "LLM 作曲超过 %d 秒未返回" % budget_sec}
+            return box["result"]
