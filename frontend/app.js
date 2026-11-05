@@ -52,50 +52,7 @@ const state = {
 const ACTIVE_JOBS_KEY = "songweaver.activeJobs";
 
 /* ================= 初始化 ================= */
-/* ================= 主题系统（Han themes，16 套） ================= */
-const HAN_THEMES = [
-  { id: "default", label: "夜幕（默认）" },
-  { id: "ink", label: "水墨" },
-  { id: "landscape", label: "青绿山水" },
-  { id: "celadon", label: "青瓷" },
-  { id: "porcelain", label: "青花瓷" },
-  { id: "dunhuang", label: "敦煌壁画" },
-  { id: "imperial", label: "宫廷金" },
-  { id: "wuxia", label: "武侠玄墨" },
-  { id: "tea", label: "当代茶空间" },
-  { id: "qinhan", label: "秦汉 · 雄浑" },
-  { id: "weijin", label: "魏晋 · 飘逸" },
-  { id: "tang", label: "盛唐 · 雍容" },
-  { id: "song", label: "宋 · 清雅" },
-  { id: "yuan", label: "元 · 多元" },
-  { id: "ming", label: "明 · 精致" },
-  { id: "qing", label: "清 · 繁缛" },
-  { id: "vermilion", label: "朱砂" },
-];
-function applyTheme(id) {
-  const root = document.documentElement;
-  if (!id || id === "default") delete root.dataset.theme;
-  else root.dataset.theme = id;
-  try { localStorage.setItem("han-theme", id); } catch (e) { /* 忽略 */ }
-}
-function initTheme() {
-  const sel = $("theme-sel");
-  if (!sel) return;
-  HAN_THEMES.forEach((t) => {
-    const o = document.createElement("option");
-    o.value = t.id;
-    o.textContent = "🖌 " + t.label;
-    sel.appendChild(o);
-  });
-  let saved = "default";
-  try { saved = localStorage.getItem("han-theme") || "default"; } catch (e) { /* 忽略 */ }
-  if (saved !== "default") document.documentElement.dataset.theme = saved;
-  sel.value = saved;
-  sel.onchange = () => applyTheme(sel.value);
-}
-
 document.addEventListener("DOMContentLoaded", async () => {
-  initTheme();
   bindEvents();
   try { await establishSession(); } catch (e) { console.error(e); }
   await loadMeta();

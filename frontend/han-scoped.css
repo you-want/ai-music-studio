@@ -1,7 +1,18 @@
 /*
- * Han 主题系统入口（style.css 的主题变量层）。
- * 页面根元素：<html data-han-scope data-theme="...">
- * 本文件只负责加载主题定义；UI 实现与默认（夜幕）变量在 style.css。
- * 可用主题见 themes-scoped.css（16 套）与页头主题切换器。
+ * Han scoped stylesheet entry point for existing applications.
+ *
+ * Add data-han-scope and data-theme to the same host container. This entry
+ * does not define variables on :root and does not import Han's global base.
  */
+@import url("./tokens-scoped.css");
 @import url("./themes-scoped.css");
+@import url("./utilities.css");
+@import url("./accessibility-scoped.css");
+@import url("./icons.css");
+@import url("./patterns.css");
+@import url("./typography.css");
+@import url("./components.css");
+@import url("./iconic.css");
+@import url("./structure.css");
+@import url("./enhanced.css");
+@import url("./motion.css");
