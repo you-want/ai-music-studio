@@ -403,8 +403,16 @@ class JobManager:
         self._done(job, meta, "diffrhythm-edit")
 
     def _postprocess_audio(self, job, req, spec, song_id, ev):
-        """音频作品统一后处理：Whisper 对齐 + Demucs 分轨 + lite 曲谱。"""
+        """音频作品统一后处理：母带 + Whisper 对齐 + Demucs 分轨 + lite 曲谱。"""
         wav = self.store.wav_path(song_id)
+        cfg = self._get_config()
+        if (cfg.get("neural") or {}).get("master", True) and req.get("provider") == "diffrhythm":
+            job.update(stage_note="🎚 母带处理（响度归一 -14 LUFS）…", progress=0.91)
+            from .providers.diffrhythm import master_wav
+            try:
+                master_wav(wav)
+            except Exception as e:  # noqa: BLE001
+                job.update(stage_note="母带跳过: %s" % str(e)[:60])
         duration = _wav_duration(wav)
         lines = neural_lyric_lines(spec, max_sec=neural_resolve_length(req) - 2)
         score = None
@@ -486,15 +494,22 @@ class JobManager:
         if llm_cfg.get("enabled"):
             if mode in AUDIO_PROVIDERS:
                 # 音频流程有整体时间预算：LLM 挂起（慢滴响应绕过 socket 超时）
-                # 会拖死整个任务 —— 3 分钟硬预算，超时回落 Mock
-                spec, info = self._llm_with_budget(req, cfg, budget_sec=180)
+                # 会拖死整个任务 —— 硬预算，超时回落 Mock
+                print("[compose] LLM 作曲开始 (mode=%s)" % mode, flush=True)
+                spec, info = self._llm_with_budget(req, cfg)
+                print("[compose] LLM 作曲结束: %s" %
+                      ("成功" if spec is not None else "失败: %s" % (info or {}).get("reason", "?")),
+                      flush=True)
             else:
                 spec, info = llm_provider.provide(req, cfg)
             if spec is not None:
                 return spec, info
             info = {"provider": "mock(回落)", "reason": info.get("reason", "LLM 失败")}
+            print("[compose] 回落 Mock，原因: %s" % info.get("reason"), flush=True)
         spec = mock_composer.compose(req)
         spec["provider"] = "mock"
+        if info:
+            spec["compose_debug"] = info  # 回落原因持久化，便于诊断
         return spec, info
 
     def _llm_with_budget(self, req, cfg, budget_sec=300):

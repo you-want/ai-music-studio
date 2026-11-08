@@ -478,6 +478,7 @@ async function loadSong(songId, autoplay) {
   $("dl-midi").href = mediaUrl("/api/songs/" + songId + "/song.mid");
   $("dl-midi").download = data.meta.title + ".mid";
   $("dl-bundle").href = mediaUrl("/api/songs/" + songId + "/bundle.zip");
+  $("dl-share").href = mediaUrl("/api/songs/" + songId + "/share.html");
   $("dl-bundle").download = data.meta.title + "-分享包.zip";
   ["vocal", "harmony", "bass", "drums"].forEach((n) => {
     const a = $("stem-" + n);

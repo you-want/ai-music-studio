@@ -405,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
             m = re.match(r"^/api/songs/([\w-]+)/favorite$", path)
             if m and method == "POST":
                 return self._favorite(m.group(1))
-            m = re.match(r"^/api/songs/([\w-]+)/(bundle\.zip|video\.mp4)$", path)
+            m = re.match(r"^/api/songs/([\w-]+)/(bundle\.zip|video\.mp4|share\.html)$", path)
             if m and method == "GET":
                 return self._export_route(m.group(1), m.group(2))
             m = re.match(r"^/api/songs/([\w-]+)$", path)
@@ -708,6 +708,8 @@ class Handler(BaseHTTPRequestHandler):
         song_dir = lib.song_dir(song_id)
         if filename == "bundle.zip":
             return self._bundle(song_id, song_dir)
+        if filename == "share.html":
+            return self._share_page(song_id, song_dir)
         return self._video(song_id, song_dir)
 
     def _ensure_cover(self, song_id, song_dir):
@@ -747,6 +749,60 @@ class Handler(BaseHTTPRequestHandler):
         fname = urllib.parse.quote("%s-分享包.zip" % title)
         return self._send(200, buf.getvalue(), "application/zip",
                           {"Content-Disposition": "attachment; filename*=UTF-8''%s" % fname})
+
+    def _share_page(self, song_id, song_dir):
+        """单文件分享页：MP3+封面内联 base64，卡拉OK歌词跟随播放。"""
+        share = os.path.join(song_dir, "share.html")
+        if not os.path.isfile(share):
+            mp3 = os.path.join(song_dir, "share_tmp.mp3")
+            if not shutil.which("ffmpeg"):
+                return self._send(501, {"error": "未安装 ffmpeg（brew install ffmpeg）"})
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", lib_wav(song_id), "-b:a", "192k",
+                     "-ar", "44100", "-ac", "2", mp3],
+                    capture_output=True, timeout=300, check=True)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                return self._send(500, {"error": "音频转码失败: %s" % str(e)[:100]})
+            import base64
+            with open(mp3, "rb") as f:
+                mp3_b64 = base64.b64encode(f.read()).decode("ascii")
+            os.remove(mp3)
+            cover_b64 = base64.b64encode(
+                open(self._ensure_cover(song_id, song_dir), "rb").read()).decode("ascii")
+
+            meta = STATE.lib.get_meta(song_id)
+            try:
+                score = STATE.lib.get_score(song_id)
+                events = [(round(float(e[0]), 1), e[2]) for e in score.get("lyric_events", []) if len(e) > 2]
+            except (OSError, ValueError):
+                events = []
+            if not events:
+                bpm = score.get("bpm") or meta.get("bpm") or 100
+                spb = 60.0 / max(30, bpm)
+                events = [(round((sec.get("start_beat") + i) * spb, 1), l)
+                          for sec in score.get("sections", [])
+                          for i, l in enumerate(sec.get("lyrics", [])) if l]
+            lyric_data = json.dumps(events, ensure_ascii=False)
+            tags = " · ".join(filter(None, [
+                schemas.GENRE_LABELS_ZH.get(meta.get("genre"), meta.get("genre")),
+                schemas.MOOD_LABELS_ZH.get(meta.get("mood"), meta.get("mood")),
+                "%d BPM" % meta.get("bpm", 0) if meta.get("bpm") else "",
+            ]))
+            html = SHARE_TEMPLATE.format(
+                title=meta["title"], tags=tags, cover_b64=cover_b64,
+                mp3_b64=mp3_b64, lyric_data=lyric_data,
+            )
+            with open(share, "w", encoding="utf-8") as f:
+                f.write(html)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(os.path.getsize(share)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            with open(share, "rb") as f:
+                shutil.copyfileobj(f, self.wfile)
 
     def _video(self, song_id, song_dir):
         """MV 导出：封面图 + 音频 -> mp4（ffmpeg，首次生成后缓存）。
@@ -949,3 +1005,80 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def lib_wav(song_id):
+    return STATE.lib.wav_path(song_id)
+
+
+SHARE_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN" data-theme="landscape" data-han-scope>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title} · 织歌 SongWeaver</title>
+<style>
+:root {{ --paper:#f2f5f0; --ink:#2d3d35; --ink2:#5a7263; --gold:#c8a86e; --line:#c8d6c4; }}
+* {{ box-sizing:border-box; margin:0; padding:0; }}
+body {{ font-family:system-ui,-apple-system,"PingFang SC",sans-serif; background:var(--paper);
+  color:var(--ink); min-height:100vh; display:flex; justify-content:center; padding:28px 16px 60px; }}
+.wrap {{ width:min(560px,100%); }}
+.brand {{ text-align:center; margin-bottom:26px; }}
+.brand .logo {{ font-size:20px; font-weight:700; letter-spacing:2px; }}
+.brand .logo span {{ color:var(--gold); }}
+.brand .sub {{ font-size:11px; color:var(--ink2); letter-spacing:3px; margin-top:3px; }}
+.cover {{ display:block; width:min(320px,86%); border-radius:16px; margin:0 auto 20px;
+  box-shadow:0 14px 44px rgba(45,61,53,.28); }}
+h1 {{ font-size:26px; text-align:center; letter-spacing:1px; }}
+.tags {{ text-align:center; font-size:12.5px; color:var(--ink2); margin:9px 0 20px; letter-spacing:1px; }}
+audio {{ width:100%; margin-bottom:22px; }}
+.now {{ text-align:center; font-size:16.5px; min-height:26px; letter-spacing:1.5px;
+  color:var(--ink); margin-bottom:16px; font-weight:500; }}
+.lyrics {{ border-top:1px solid var(--line); padding-top:14px; }}
+.lyrics p {{ padding:5px 0; color:var(--ink2); text-align:center; font-size:14px;
+  transition:color .25s; cursor:default; }}
+.lyrics p.on {{ color:var(--ink); font-weight:600; }}
+.foot {{ text-align:center; margin-top:34px; font-size:11px; color:var(--ink2);
+  letter-spacing:2px; }}
+.foot b {{ color:var(--ink); }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><div class="logo">织<span style="color:var(--gold)">·</span>歌</div>
+    <div class="sub">SONGWEAVER</div></div>
+  <img class="cover" src="data:image/png;base64,{cover_b64}" alt="封面">
+  <h1>{title}</h1>
+  <div class="tags">{tags}</div>
+  <audio controls preload="metadata" src="data:audio/mpeg;base64,{mp3_b64}"></audio>
+  <div class="now" id="now">&nbsp;</div>
+  <div class="lyrics" id="lyrics"></div>
+  <div class="foot">由 <b>织歌 SongWeaver</b> 生成 · 一句话，织一首歌</div>
+</div>
+<script>
+const EVENTS = {lyric_data};
+const list = document.getElementById("lyrics");
+const nowEl = document.getElementById("now");
+const audio = document.querySelector("audio");
+if (!EVENTS.length) {{ document.getElementById("now").style.display = "none";
+  list.style.display = "none"; }}
+EVENTS.forEach(([t, text]) => {{
+  const p = document.createElement("p");
+  p.textContent = text; p.dataset.t = t;
+  list.appendChild(p);
+}});
+let cur = -1;
+audio.addEventListener("timeupdate", () => {{
+  const t = audio.currentTime + 0.15;
+  let idx = -1;
+  for (let i = 0; i < EVENTS.length; i++) {{ if (EVENTS[i][0] <= t) idx = i; else break; }}
+  if (idx === cur) return;
+  cur = idx;
+  [...list.children].forEach((p, i) => p.classList.toggle("on", i === idx));
+  nowEl.textContent = idx >= 0 ? EVENTS[idx][1] : "\u00a0";
+  if (idx >= 0 && list.children[idx]) list.children[idx].scrollIntoView(
+    {{ block: "nearest", behavior: "smooth" }});
+}});
+</script>
+</body>
+</html>"""

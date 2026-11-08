@@ -595,6 +595,25 @@ def separate(wav, out_dir, config_path=None, progress_cb=None, cancel_event=None
             pass
 
 
+def master_wav(wav_path):
+    """神经产物母带：EBU R128 响度归一到流媒体标准（-14 LUFS，真峰值 -1.5dB）。
+    就地覆盖；未装 ffmpeg 时静默跳过（保持模型直出）。"""
+    if not shutil.which("ffmpeg"):
+        return False
+    tmp = wav_path + ".master.wav"
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-i", wav_path,
+         "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ar", "44100", "-ac", "2",
+         "-sample_fmt", "s16", tmp],
+        capture_output=True, timeout=600)
+    if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 1000:
+        os.replace(tmp, wav_path)
+        return True
+    if os.path.isfile(tmp):
+        os.remove(tmp)
+    return False
+
+
 def lite_score(spec, duration_sec, lyric_events=None):
     """audio_only 作品的轻量曲谱：段落/歌词/和弦齐全、音符数组为空。
     lyric_events: Whisper 对齐后的 [[start,end,text,conf],...]（无则空数组）。"""

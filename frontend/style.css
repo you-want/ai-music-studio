@@ -19,6 +19,7 @@
   --sw-compose-width: 680px;
   --sw-compose-column: 380px;
   /* 墨色深底 — 比 landscape 更有层次 */
+  --han-font-kai:           "Kaiti SC", "STKaiti", "KaiTi", "PingFang SC", serif;
   --han-color-bg:           #0c1210;
   --han-color-bg-surface:   #141e18;
   --han-color-bg-elevated:  #1b2720;
