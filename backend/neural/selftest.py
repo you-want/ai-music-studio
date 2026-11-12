@@ -55,42 +55,45 @@ def main():
     ctx = {}
 
     def load_models():
+        from diffrhythm_runner import pick_device
+        device = pick_device()
         from infer_utils import prepare_model
         t0 = time.time()
-        cfm, tokenizer, muq, vae = prepare_model(2048, "cpu")
-        cfm = cfm.float()
+        cfm, tokenizer, muq, vae = prepare_model(2048, device)
+        if device == "cpu":
+            cfm = cfm.float()
         dt = next(cfm.parameters()).dtype
-        assert dt == torch.float32, "CPU 应为 fp32，实际 %s" % dt
-        ctx.update(cfm=cfm, tokenizer=tokenizer, muq=muq, vae=vae)
-        return "加载 %.1fs, rss=%.0fMB" % (time.time() - t0, rss_mb())
+        ctx.update(cfm=cfm, tokenizer=tokenizer, muq=muq, vae=vae, device=device, dt=dt)
+        return "device=%s 加载 %.1fs, rss=%.0fMB" % (device, time.time() - t0, rss_mb())
 
     def tokenize():
         from infer_utils import get_lrc_token
         lrc = "[00:00.50]测试第一句\n[00:05.00]测试第二句\n[01:34.90]啊"
         lrc_emb, start_time, end_frame, song_dur = get_lrc_token(
-            2048, lrc, ctx["tokenizer"], 95, "cpu")
+            2048, lrc, ctx["tokenizer"], 95, ctx.get("device", "cpu"))
         assert lrc_emb.shape == (1, 2048), lrc_emb.shape
         assert end_frame == 2048
         ctx["lrc_emb"] = lrc_emb
-        ctx["start_time"] = start_time.float()
-        ctx["song_dur"] = song_dur.float()
+        ctx["start_time"] = start_time.to(ctx["dt"])
+        ctx["song_dur"] = song_dur.to(ctx["dt"])
         return "tokens=%d end_frame=%d" % (int((lrc_emb > 0).sum()), end_frame)
 
     def style_text():
         from infer_utils import get_style_prompt, get_negative_style_prompt
         sp = get_style_prompt(ctx["muq"], prompt="pop, uplifting, mandarin song, female vocal")
-        neg = get_negative_style_prompt("cpu")
-        ctx["style"] = sp.float()
-        ctx["neg"] = neg.float()
+        neg = get_negative_style_prompt(ctx.get("device", "cpu"))
+        ctx["style"] = sp.to(ctx["dt"])
+        ctx["neg"] = neg.to(ctx["dt"])
         return "style=%s neg=%s" % (tuple(sp.shape), tuple(neg.shape))
 
     # ---- Euler 等价性校验（可选）：手动逐步 vs 上游 odeint ----
     def euler_check():
         from infer_utils import get_reference_latent
         cfm = ctx["cfm"]
-        cond, pred_frames = get_reference_latent("cpu", 2048, False, None, None, ctx["vae"])
-        end = 2048
+        cond, pred_frames = get_reference_latent(ctx.get("device", "cpu"), 2048, False, None, None, ctx["vae"])
+        cond = cond.to(ctx["dt"])
         step_cond = torch.zeros_like(cond)
+        end = 2048
         text = ctx["lrc_emb"]
         sp, neg = ctx["style"], ctx["neg"]
         st, sd = ctx["start_time"], ctx["song_dur"]
@@ -115,8 +118,8 @@ def main():
         # 手动 Euler（runner 路径；seed 在 randn 前设置，与上游 sample 内部一致）
         torch.manual_seed(7)
         with torch.inference_mode():
-            x = torch.randn(end, cfm.num_channels, dtype=step_cond.dtype).unsqueeze(0)
-            t_grid = torch.linspace(0, 1, 4, dtype=step_cond.dtype)
+            x = torch.randn(end, cfm.num_channels, device=cond.device, dtype=step_cond.dtype).unsqueeze(0)
+            t_grid = torch.linspace(0, 1, 4, device=cond.device, dtype=step_cond.dtype)
             for i in range(3):
                 x = x + (t_grid[i + 1] - t_grid[i]) * fn(t_grid[i], x)
         diff = (x - ref).abs().max().item()
@@ -126,7 +129,8 @@ def main():
     def mini_gen():
         from infer_utils import decode_audio, get_reference_latent
         cfm, vae = ctx["cfm"], ctx["vae"]
-        cond, _ = get_reference_latent("cpu", 2048, False, None, None, vae)
+        cond, _ = get_reference_latent(ctx.get("device", "cpu"), 2048, False, None, None, vae)
+        cond = cond.to(ctx["dt"])
         end = 2048
         step_cond = torch.zeros_like(cond)
         sp, neg = ctx["style"], ctx["neg"]
@@ -143,15 +147,15 @@ def main():
 
         torch.manual_seed(42)
         with torch.inference_mode():
-            x = torch.randn(end, cfm.num_channels, dtype=step_cond.dtype).unsqueeze(0)
-            t_grid = torch.linspace(0, 1, 3, dtype=step_cond.dtype)
+            x = torch.randn(end, cfm.num_channels, device=cond.device, dtype=step_cond.dtype).unsqueeze(0)
+            t_grid = torch.linspace(0, 1, 3, device=cond.device, dtype=step_cond.dtype)
             t0 = time.time()
             for i in range(2):
                 x = x + (t_grid[i + 1] - t_grid[i]) * fn(t_grid[i], x)
             sample_sec = time.time() - t0
             latent = x.to(torch.float32).transpose(1, 2)
             out = decode_audio(latent, vae, chunked=True).reshape(2, -1)
-            out = (out / out.abs().max().clamp(min=1e-8)).clamp(-1, 1).mul(32767).to(torch.int16)
+            out = (out / out.abs().max().clamp(min=1e-8)).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
         arr = out.numpy().T.astype("<i2")
         path = os.path.join(os.getcwd(), "test_output", "selftest.wav")
         os.makedirs(os.path.dirname(path), exist_ok=True)

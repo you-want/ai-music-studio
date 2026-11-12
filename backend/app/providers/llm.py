@@ -12,6 +12,8 @@ import re
 import ssl
 import tempfile
 import time
+import http.client
+import socket
 import urllib.error
 import urllib.request
 
@@ -244,8 +246,9 @@ LYRICS_RAP_ADDENDUM = """
 _lyrics_cache = {}  # (主题,风格,情绪) -> 歌词文本；同参数不重复调用
 
 
-def _chat(payload, llm, attempts=2):
-    """带退避重试的 Chat 调用（429/5xx 重试一次）。"""
+def _chat(payload, llm, attempts=3):
+    """带退避重试的 Chat 调用：429/5xx 及连接级故障（代理闪断/慢滴）
+    均退避重试，鉴权类错误（401/403）直接抛出。"""
     http_req = urllib.request.Request(
         _endpoint(llm["base_url"]),
         data=json.dumps(payload).encode("utf-8"),
@@ -263,6 +266,13 @@ def _chat(payload, llm, attempts=2):
             last_err = e
             if e.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
                 time.sleep(2)
+                continue
+            raise
+        except (http.client.RemoteDisconnected, ConnectionResetError,
+                TimeoutError, socket.timeout) as e:
+            last_err = e
+            if attempt < attempts - 1:
+                time.sleep(3 * (attempt + 1))
                 continue
             raise
     raise last_err

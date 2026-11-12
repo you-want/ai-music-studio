@@ -18,6 +18,18 @@ sys.path.insert(0, os.getcwd())
 sys.path.insert(0, os.path.join(os.getcwd(), "infer"))
 
 import numpy as np  # noqa: E402
+
+try:
+    # espeak-ng 动态库/数据路径（espeakng-loader 自带多平台二进制）
+    import espeakng_loader
+    os.environ.setdefault("PHONEMIZER_ESPEAK_LIBRARY", espeakng_loader.get_library_path())
+    os.environ.setdefault("ESPEAK_DATA_PATH",
+                            os.path.dirname(espeakng_loader.get_data_path()))
+    os.environ.setdefault("PHONEMIZER_ESPEAK_PATH", os.path.join(
+        os.path.dirname(espeakng_loader.get_library_path()), "espeak-ng"))
+except ImportError:
+    pass
+
 import torch  # noqa: E402
 
 

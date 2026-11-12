@@ -37,6 +37,7 @@ stdout 只输出 JSON 行（父进程逐行解析）：
 import json
 import math
 import os
+import platform
 import random
 import sys
 import time
@@ -47,6 +48,18 @@ import wave
 os.environ.setdefault("HF_HOME", os.path.join(os.getcwd(), "pretrained", "hf"))
 sys.path.insert(0, os.getcwd())          # model/ g2p/ thirdparty/
 sys.path.insert(0, os.path.join(os.getcwd(), "infer"))  # infer_utils
+
+
+try:
+    # espeak-ng 动态库/数据路径（espeakng-loader 自带多平台二进制）
+    import espeakng_loader
+    os.environ.setdefault("PHONEMIZER_ESPEAK_LIBRARY", espeakng_loader.get_library_path())
+    os.environ.setdefault("ESPEAK_DATA_PATH",
+                            os.path.dirname(espeakng_loader.get_data_path()))
+    os.environ.setdefault("PHONEMIZER_ESPEAK_PATH", os.path.join(
+        os.path.dirname(espeakng_loader.get_library_path()), "espeak-ng"))
+except ImportError:
+    pass
 
 import torch  # noqa: E402
 
@@ -80,9 +93,12 @@ def rss_mb():
 
 
 def pick_device():
-    # 默认 CPU（fp32，基准路径）；MPS 不自动选（Intel Metal 内存池 ~6.7GB 会 OOM），
-    # Apple Silicon 用户可显式 DIFFRHYTHM_DEVICE=mps。
+    # 优先级：CUDA（NVIDIA）> Apple Silicon 的 MPS（GPU 加速）> CPU。
+    # Intel Mac 的 Metal 内存池过小会 OOM，故仅 arm64 自动启用 MPS；
+    # DIFFRHYTHM_DEVICE 环境变量可显式覆盖一切。
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu" and platform.machine() == "arm64" and torch.backends.mps.is_available():
+        device = "mps"
     if os.environ.get("DIFFRHYTHM_DEVICE"):
         device = os.environ["DIFFRHYTHM_DEVICE"]
     return device
@@ -91,7 +107,7 @@ def pick_device():
 def load_models(device, max_frames):
     from infer_utils import prepare_model
     cfm, tokenizer, muq, vae = prepare_model(max_frames, device)
-    if device == "cpu":
+    if device in ("cpu", "mps"):
         cfm = cfm.float()  # 上游强制 fp16；CPU 转 fp32
     dt = next(cfm.parameters()).dtype
     return cfm, tokenizer, muq, vae, dt
@@ -234,6 +250,8 @@ def run_job(job, ctx, prog):
             sampled = x
         prog(0.90, "采样完成，正在解码音频…")
     log("id=%s sampling cost %.1fs" % (jid, time.time() - s_t))
+    log("id=%s sampled stats: absmax=%.4f nan=%s" % (
+        jid, sampled.abs().max().item(), torch.isnan(sampled).any().item()))
 
     # edit：区间外写回原曲 latent（缺这步会丢失未编辑段！）
     if edit:
@@ -241,13 +259,16 @@ def run_job(job, ctx, prog):
 
     # ---- VAE 解码 -> WAV ----
     v_t = time.time()
+    # VAE 解码固定走 CPU：常驻 worker 里 MPS 解码实测会产生全零输出（状态污染），
+    # CPU 解码 95s 曲约 20-40s，可接受；采样（大头算力）仍在 GPU。
     with torch.inference_mode():
-        latent = sampled.to(torch.float32).transpose(1, 2)  # [b d t]
-        output = decode_audio(latent, vae, chunked=True)
+        latent = sampled.to(torch.float32).cpu().transpose(1, 2)  # [b d t]
+        vae_cpu = vae.to("cpu")
+        output = decode_audio(latent, vae_cpu, chunked=True)
         output = output.reshape(output.shape[1], -1)  # [d n]（batch=1）
         output = (output / torch.max(torch.abs(output))
                   .clamp(min=1e-8)).clamp(-1, 1).mul(32767).to(torch.int16).cpu()
-    arr = output.numpy().T.astype("<i2")  # [n, 2]
+    arr = output.cpu().numpy().T.astype("<i2")  # [n, 2]（MPS 上必须先拷回主机内存）
 
     os.makedirs(os.path.dirname(out_wav) or ".", exist_ok=True)
     with wave.open(out_wav, "wb") as w:
@@ -255,6 +276,8 @@ def run_job(job, ctx, prog):
         w.setsampwidth(2)
         w.setframerate(44100)
         w.writeframes(arr.tobytes())
+    log("id=%s int16 stats: absmax=%d rms=%.1f" % (
+        jid, int(np.abs(arr).max()), float(np.sqrt((arr.astype(np.float32) ** 2).mean()))))
     log("id=%s vae decode + save cost %.1fs" % (jid, time.time() - v_t))
 
     prog(1.0, "完成")
