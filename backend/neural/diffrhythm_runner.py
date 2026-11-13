@@ -37,6 +37,7 @@ stdout 只输出 JSON 行（父进程逐行解析）：
 import json
 import math
 import os
+import numpy as np
 import platform
 import random
 import sys
@@ -164,7 +165,6 @@ def run_job(job, ctx, prog):
 
     # ---- 风格 prompt（persona 嵌入 + 文本风格融合 > persona 单独 > 参考音频 > 文本） ----
     if job.get("style_prompt_npy"):
-        import numpy as np
         prog(0.15, "加载音色 Persona…")
         import torch.nn.functional as F
         persona = torch.from_numpy(

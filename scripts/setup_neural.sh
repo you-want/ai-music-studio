@@ -54,7 +54,7 @@ if [ -n "${AI_MUSIC_UV_INDEX:-}" ]; then
   export UV_DEFAULT_INDEX="$AI_MUSIC_UV_INDEX"
   echo "    使用镜像: $UV_DEFAULT_INDEX"
 fi
-COMMON_PKGS="py3langid==0.3.0 transformers==4.49.0 tokenizers x-transformers==2.1.2 torchdiffeq==0.2.5 ema-pytorch einops accelerate muq==0.1.0 mutagen jieba pypinyin cn2an pykakasi phonemizer Unidecode inflect py3langid onnxruntime prefigure huggingface_hub safetensors"
+COMMON_PKGS="py3langid==0.3.0 faster-whisper>=1.0 demucs>=4.0 transformers==4.49.0 tokenizers x-transformers==2.1.2 torchdiffeq==0.2.5 ema-pytorch einops accelerate muq==0.1.0 mutagen jieba pypinyin cn2an pykakasi phonemizer Unidecode inflect py3langid onnxruntime prefigure huggingface_hub safetensors"
 if [ "$(uname -m)" = "arm64" ]; then
   # Apple Silicon：现代 torch + MPS GPU 加速；现代 numba/llvmlite 有 arm64 轮子
   uv pip install -q -p "$PY" \

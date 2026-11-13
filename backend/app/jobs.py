@@ -190,6 +190,14 @@ class JobManager:
         ev = self._cancel_events.get(job_id)
         if ev:
             ev.set()
+        # worker 管道可能已断（服务/worker 重启后），此时后台线程收不到 cancel_event。
+        # 立即把任务标为 canceled，前端刷新后不再无限显示 running。
+        with self._lock:
+            current = self._jobs.get(job_id)
+            if current and current.get("status") not in ("done", "error", "canceled"):
+                current.update(status="canceled", stage="canceled",
+                               stage_note=STAGES_ZH["canceled"], progress=0.0,
+                               error="任务已取消（worker 连接已断开）")
         return self.status(job_id)
 
     def _finished(self, job_id):
