@@ -33,8 +33,8 @@
   `model.safetensors`，MuQ 权重是 `pytorch_model.bin` 需转换；②numba/llvmlite
   新版无 macOS x86_64 轮子，需 pin 0.60.0/0.43.0；
 - 内存峰值实测 ~9.4GB（cfm 2.2GB + muq 2.65GB + vae 0.6GB + fp32 工作区）；
-- **本机（i7-9750H 6 核 CPU）实测计时**：模型加载 43s，采样约 45-120s/步
-  （16 步默认），VAE 解码 2-3 分钟 —— 整曲约 **15-25 分钟/首**。
+- **迁移前 Intel i7-9750H 实测；当前 M1 Max MPS 实测**：Intel 旧机：模型加载 43s，16 步采样约 15-25 分钟；M1 Max：模型加载约 24s，
+  **32 步采样约 44s，VAE 解码约 20-30s，整曲约 3 分钟/首**（MPS GPU）。
 
 ## 2. 商业产品功能矩阵（2026 现状）
 
