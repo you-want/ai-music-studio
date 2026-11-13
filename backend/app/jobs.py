@@ -198,6 +198,9 @@ class JobManager:
                 current.update(status="canceled", stage="canceled",
                                stage_note=STAGES_ZH["canceled"], progress=0.0,
                                error="任务已取消（worker 连接已断开）")
+                sid = current.get("song_id")
+                if sid and not self.store.exists(sid):
+                    shutil.rmtree(self.store.song_dir(sid), ignore_errors=True)
         return self.status(job_id)
 
     def _finished(self, job_id):
